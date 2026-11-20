@@ -7,6 +7,7 @@
 ## X-Curse-Project-ID: 1819349
 ## IconTexture: Interface\Icons\INV_Misc_Coin_02
 ## AddonCompartmentFunc: LootSupervisor_OnAddonCompartmentClick
+## OptionalDeps: ForeverDungeonJournal
 ## SavedVariables: LootSupervisorDB
 
 Core.lua

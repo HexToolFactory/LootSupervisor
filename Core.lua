@@ -596,6 +596,93 @@ local function newKill(key, name, encounterID)
 	return k
 end
 
+-- a creature belongs to an encounter: link it and fold what was saved under the creature into the boss
+local function linkNpc(npc, key)
+	if not npc or not key then
+		return
+	end
+	DB.links[npc] = key
+	local old = DB.bosses["n" .. npc]
+	if not old or key == "n" .. npc then
+		return
+	end
+	local e = entry(key, old.name)
+	e.loots = e.loots + (old.loots or 0)
+	for cid, d in pairs(old.cur or {}) do
+		local t = e.cur[cid] or { drops = 0, total = 0 }
+		e.cur[cid] = t
+		t.drops = t.drops + (d.drops or 0)
+		t.total = t.total + (d.total or 0)
+		t.last = d.last or t.last
+	end
+	e.kills = math.max(e.kills, e.loots)
+	DB.bosses["n" .. npc] = nil
+end
+
+-- the boss creature of an encounter from DungeonJournal's data, when it is loaded:
+-- encounter ID -> boss name (RUNLOG_ENCOUNTERS), boss name -> npcID (DB[dungeon].bosses)
+local function djBossNpc(encounterID, name)
+	local ns = _G.ForeverDungeonJournal_NS
+	if type(ns) ~= "table" or type(ns.DB) ~= "table" then
+		return nil
+	end
+	local names, dungeon = {}, nil
+	local known = type(ns.RUNLOG_ENCOUNTERS) == "table" and encounterID and ns.RUNLOG_ENCOUNTERS[encounterID]
+	if type(known) == "table" then
+		dungeon = known[1]
+		if type(known[2]) == "string" then
+			names[known[2]:lower()] = true
+		end
+	end
+	if type(name) == "string" then
+		names[name:lower()] = true
+	end
+	local found
+	for dname, d in pairs(ns.DB) do
+		if type(d) == "table" and type(d.bosses) == "table" then
+			for _, b in ipairs(d.bosses) do
+				if type(b) == "table" and type(b.npcID) == "number" then
+					local hit = type(b.name) == "string" and names[b.name:lower()]
+					for _, alias in ipairs(type(b.aliases) == "table" and b.aliases or {}) do
+						hit = hit or (type(alias) == "string" and names[alias:lower()])
+					end
+					if hit then
+						if dname == dungeon then
+							return b.npcID
+						end
+						found = found or b.npcID
+					end
+				end
+			end
+		end
+	end
+	return found
+end
+
+-- creatures in the boss frames during an encounter (boss1..boss5), if the game sets them
+local engaged = {}
+local function noteBossUnits()
+	for i = 1, 5 do
+		local npc = npcIdOf(UnitGUID and plain(UnitGUID("boss" .. i)))
+		if npc then
+			engaged[npc] = true
+		end
+	end
+end
+
+-- known encounters learn their creature from DungeonJournal (repairs data saved under the creature)
+local function linkKnownEncounters()
+	for key, e in pairs(DB.bosses) do
+		local enc = tonumber(key:match("^e(%d+)$"))
+		if enc then
+			local npc = djBossNpc(enc, e.name)
+			if npc and not DB.links[npc] then
+				linkNpc(npc, key)
+			end
+		end
+	end
+end
+
 local function killsOfNpc(npc)
 	local found = {}
 	for _, k in ipairs(kills) do
@@ -726,10 +813,10 @@ local function recordCorpse(c)
 	if #matching == 0 and c.npc then
 		for i = #kills, 1, -1 do
 			local k = kills[i]
-			if k.enc and next(k.npcs) == nil and now() - k.t <= 60 then
+			if k.enc and next(k.npcs) == nil and now() - k.t <= 300 then
 				if (name and k.name and norm(name) == norm(k.name)) or isBossCorpse(c.guid) then
 					k.npcs[c.npc] = true
-					DB.links[c.npc] = k.key
+					linkNpc(c.npc, k.key)
 					matching = { k }
 				end
 				break
@@ -1071,11 +1158,21 @@ local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 		for _, u in ipairs(units) do
 			local id = type(u) == "table" and plain(u.creatureID)
 			if id then
-				k.npcs[id] = true
-				DB.links[id] = key
+				linkNpc(id, key)
 			end
 		end
 	end
+	-- no creature IDs in the event (Forever dungeons): boss frames of the fight, then DungeonJournal's data
+	noteBossUnits()
+	for npc in pairs(engaged) do
+		linkNpc(npc, key)
+	end
+	engaged = {}
+	local djNpc = djBossNpc(encounterID, e.name)
+	if djNpc and not DB.links[djNpc] then
+		linkNpc(djNpc, key)
+	end
+	e = DB.bosses[key]
 	for npc, link in pairs(DB.links) do
 		if link == key then
 			k.npcs[npc] = true
@@ -1301,6 +1398,8 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame:RegisterEvent("ENCOUNTER_END")
+frame:RegisterEvent("ENCOUNTER_START")
+frame:RegisterEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
 frame:RegisterEvent("LOOT_OPENED")
 frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("CHAT_MSG_CURRENCY")
@@ -1337,7 +1436,12 @@ frame:SetScript("OnEvent", function(_, event, ...)
 	if not DB then
 		return
 	end
-	if event == "ENCOUNTER_END" then
+	if event == "ENCOUNTER_START" then
+		engaged = {}
+		noteBossUnits()
+	elseif event == "INSTANCE_ENCOUNTER_ENGAGE_UNIT" then
+		noteBossUnits()
+	elseif event == "ENCOUNTER_END" then
 		onEncounterEnd(...)
 	elseif event == "LOOT_OPENED" then
 		onLootOpened()
@@ -1357,6 +1461,9 @@ frame:SetScript("OnEvent", function(_, event, ...)
 	elseif event == "UPDATE_MOUSEOVER_UNIT" then
 		checkCorpse("mouseover")
 	elseif event == "PLAYER_ENTERING_WORLD" or event == "GROUP_ROSTER_UPDATE" then
+		if event == "PLAYER_ENTERING_WORLD" then
+			linkKnownEncounters()
+		end
 		hello(false)
 		rememberClasses()
 	end

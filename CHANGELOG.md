@@ -11,6 +11,9 @@
 - Search box: type a player or item name. It filters the open tab; a kill then shows only the matching items.
 - Shift-click an item to link it in chat. The window updates while open.
 - The currency list in chat moved to `/lsup currency`.
+- Fix: no loot reminder after dungeon bosses (seen in Dire Maul). Their kill event names no creature, so the
+  boss and its corpse stayed apart. The boss is now found from the boss frames of the fight or, with DungeonJournal
+  loaded, from its boss list. Currency saved under the corpse moves to the boss at the next login.
 
 ## 0.3.1
 - Fix: trash rolls ("Miscellaneous") were copied into a new log entry each time the game resent its roll history.
