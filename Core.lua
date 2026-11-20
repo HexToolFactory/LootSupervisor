@@ -3,7 +3,7 @@
 
 local ADDON_NAME = ...
 local PREFIX = "LootSup"
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 local KILL_WINDOW = 180 -- seconds a kill stays open for loot and whispers
 local HINT_TIME = 120 -- seconds the reminder stays up after a kill
 local TARGET_HINT_TIME = 20 -- seconds for a reminder raised by targeting a corpse
@@ -211,6 +211,101 @@ local function corpseItems(rec, links)
 	rec.corpse = true
 end
 
+-- 0.3.0 copied resent roll history into new entries: drop rolls logged twice (same group, key and item
+-- within 6 h) and entries that end up empty
+local function dedupeLog()
+	local seen = {}
+	local removed = 0
+	for _, rec in ipairs(DB.log) do
+		if rec.enc then
+			local keep, had = {}, #rec.items
+			for _, it in ipairs(rec.items) do
+				local k = it.key and (rec.enc .. ":" .. it.key .. ":" .. tostring(it.id))
+				if k and seen[k] and rec.time - seen[k] <= 6 * 3600 then
+					removed = removed + 1
+				else
+					if k then
+						seen[k] = rec.time
+					end
+					keep[#keep + 1] = it
+				end
+			end
+			rec.items = keep
+			rec.emptied = had > 0 and #keep == 0 and next(rec.cur) == nil or nil
+		end
+	end
+	for i = #DB.log, 1, -1 do
+		if DB.log[i].emptied then
+			table.remove(DB.log, i)
+		end
+	end
+	return removed
+end
+
+-- own loot windows of this session, so a kill logged only from the roll history (no boss event, or one
+-- without its creature IDs) still gets the corpse's items and your currency
+local recentCorpses = {} -- { items = { [link] = slots }, cur, ids = { [itemID] = true }, t, recs = { [rec] = true } }
+
+local function giveCorpse(rec, corpse)
+	if corpse.recs[rec] then
+		return
+	end
+	corpse.recs[rec] = true
+	corpseItems(rec, corpse.items)
+	for cid, amount in pairs(corpse.cur) do
+		rec.cur[cid] = (rec.cur[cid] or 0) + amount
+	end
+end
+
+-- a rolled item of this record that we saw in one of our loot windows: that window was this kill
+local function attachCorpses(rec, itemID)
+	local t = now()
+	for i = #recentCorpses, 1, -1 do
+		local corpse = recentCorpses[i]
+		if t - corpse.t > LOG_WINDOW then
+			break
+		end
+		if corpse.ids[itemID] then
+			giveCorpse(rec, corpse)
+		end
+	end
+end
+
+-- a loot window: remembered, and given to a logged kill whose roll history already holds one of its items
+local function rememberCorpse(c, ownerRec)
+	local ids = {}
+	for link in pairs(c.items or {}) do
+		local id = itemIdOf(link)
+		if id then
+			ids[id] = true
+		end
+	end
+	local corpse = { items = c.items or {}, cur = c.cur or {}, ids = ids, t = now(), recs = {} }
+	if ownerRec then
+		corpse.recs[ownerRec] = true
+	end
+	recentCorpses[#recentCorpses + 1] = corpse
+	while #recentCorpses > 20 do
+		table.remove(recentCorpses, 1)
+	end
+	if ownerRec then
+		return
+	end
+	local t = time()
+	for i = #DB.log, 1, -1 do
+		local rec = DB.log[i]
+		if t - rec.time > LOG_WINDOW then
+			break
+		end
+		for _, it in ipairs(rec.items) do
+			if it.key and ids[it.id] then
+				giveCorpse(rec, corpse)
+				break
+			end
+		end
+	end
+end
+
 -- Enum.EncounterLootDropRollState
 local ROLL_STATE = { [0] = "Need", [1] = "Need (off)", [2] = "Transmog", [3] = "Greed", [4] = "No roll", [5] = "Pass" }
 
@@ -277,6 +372,7 @@ local function historyDrop(rec, info)
 			end
 		end
 	end
+	attachCorpses(rec, id)
 end
 
 -- the item entry a chat line is about; a new one only for rare+ items when the boss loot was not seen
@@ -348,6 +444,9 @@ local function fmtPattern(fmt)
 	end)
 	p = p:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")
 	p = p:gsub("\001", "(%%d+)"):gsub("\002", "(.+)")
+	if p:sub(-2) == "%." then
+		p = p:sub(1, -3) .. "%.?" -- "You receive loot: [x]" arrives without the final period
+	end
 	return "^" .. p .. "$", order
 end
 
@@ -691,6 +790,9 @@ local function recordCorpse(c)
 	if hintOwner and c.guid and hintOwner.guid == c.guid then
 		hideHint()
 	end
+	if first and c.npc and (next(c.items or {}) or hasCurrency) then
+		rememberCorpse(c, matching[1] and matching[1].rec)
+	end
 	if c.npc then
 		keys[#keys + 1] = "n" .. c.npc
 	end
@@ -918,6 +1020,25 @@ end
 local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 	encounterID = plain(encounterID)
 	success = plain(success)
+	-- diagnostics: does this boss send the event, and does it name its creatures?
+	local unitIds = {}
+	if type(units) == "table" and not (issecretvalue and issecretvalue(units)) then
+		for _, u in ipairs(units) do
+			unitIds[#unitIds + 1] = type(u) == "table" and plain(u.creatureID) or "?"
+		end
+	end
+	local diag = DB.diag.encounters
+	diag[#diag + 1] = {
+		at = date("%Y-%m-%d %H:%M:%S"),
+		id = encounterID,
+		name = plain(encounterName),
+		success = success,
+		units = table.concat(unitIds, ","),
+		zone = instanceName(),
+	}
+	while #diag > 30 do
+		table.remove(diag, 1)
+	end
 	if not encounterID or not (success == 1 or success == true) then
 		return
 	end
@@ -1079,6 +1200,40 @@ local function historyRec(encounterID)
 	return logKill(name, encounterID) -- rolls after a /reload or of a kill we did not see end
 end
 
+-- the record already holding this drop: the game resends its whole roll history (trash rolls stay in
+-- one "Miscellaneous" group all session), so a drop is found again by its key, wherever it was logged
+local function keyRec(encounterID, info)
+	local key, id = plain(info.lootListKey), itemIdOf(plain(info.itemHyperlink))
+	if not (key and id) then
+		return nil
+	end
+	local t = time()
+	for i = #DB.log, 1, -1 do
+		local rec = DB.log[i]
+		if t - rec.time > 6 * 3600 then
+			return nil
+		end
+		if rec.enc == encounterID then
+			for _, it in ipairs(rec.items) do
+				if it.key == key and it.id == id then
+					return rec
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function noteHistory(encounterID)
+	local list = DB.diag.history
+	if list[#list] ~= encounterID then
+		list[#list + 1] = encounterID
+		while #list > 20 do
+			table.remove(list, 1)
+		end
+	end
+end
+
 local function onHistoryDrop(encounterID, lootListKey)
 	encounterID, lootListKey = plain(encounterID), plain(lootListKey)
 	if not (encounterID and lootListKey and C_LootHistory and C_LootHistory.GetSortedInfoForDrop) then
@@ -1088,7 +1243,8 @@ local function onHistoryDrop(encounterID, lootListKey)
 	if not ok or type(info) ~= "table" then
 		return
 	end
-	local rec = historyRec(encounterID)
+	noteHistory(encounterID)
+	local rec = keyRec(encounterID, info) or historyRec(encounterID)
 	if rec then
 		historyDrop(rec, info)
 	end
@@ -1103,10 +1259,16 @@ local function onHistoryEncounter(encounterID)
 	if not ok or type(drops) ~= "table" then
 		return
 	end
-	local rec = historyRec(encounterID)
-	if rec then
-		for _, info in ipairs(drops) do
-			if type(info) == "table" then
+	noteHistory(encounterID)
+	local open
+	for _, info in ipairs(drops) do
+		if type(info) == "table" then
+			local rec = keyRec(encounterID, info)
+			if not rec then
+				open = open or historyRec(encounterID)
+				rec = open
+			end
+			if rec then
 				historyDrop(rec, info)
 			end
 		end
@@ -1137,6 +1299,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		DB.currencies = DB.currencies or {}
 		DB.links = DB.links or {}
 		DB.log = DB.log or {}
+		DB.diag = DB.diag or {}
+		DB.diag.encounters = DB.diag.encounters or {}
+		DB.diag.history = DB.diag.history or {}
+		dedupeLog()
 		for k, v in pairs(DEFAULTS) do
 			if DB[k] == nil then
 				DB[k] = v
