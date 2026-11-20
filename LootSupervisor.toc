@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Loot Supervisor
+## Notes: Logs every boss kill (date, items, who won) and which boss drops which currency, reminds you to loot it and whispers group members who did not. /lsup
+## Author: HexToolFactory
+## Version: @project-version@
+## Category: Loot
+## SavedVariables: LootSupervisorDB
+
+Core.lua
