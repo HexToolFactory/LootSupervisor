@@ -3,8 +3,8 @@
 ## 0.3.1
 - Fix: trash rolls ("Miscellaneous") were copied into a new log entry each time the game resent its roll history.
   Each roll is now logged once. Copies already saved by 0.3.0 are removed on the next login.
-- Fix: bosses without a boss-kill event (seen in Dire Maul) were logged from the roll history only, without your
-  own loot and currency. Your loot window now joins the kill when one of its items shows up in that boss's rolls.
+- Fix: a boss kill could be logged with its rolls but without your own loot and currency (seen at Pusillin in
+  Dire Maul). Your loot window now joins the kill when one of its items shows up in that boss's rolls, in either order.
 - "You receive loot: [x]" lines without a final period are read too.
 
 ## 0.3.0
