@@ -2,7 +2,7 @@
 
 ## 0.4.1
 - Every boss of level 55 or higher counts as a Tarnished Undermine Real dropper, already on its first kill:
-  the loot reminder shows and the group gets whispered without anyone having looted one before.
+  the loot reminder shows and the whisper check runs without anyone having looted one before.
   The level comes from the boss frames, your dead target or DungeonJournal's boss list.
 - Whispers now go only to group members who run Loot Supervisor (`/lsup whisper addon`, the new default).
   WoW: Forever shows no other player's currency loot in chat, so members without the addon were whispered even
