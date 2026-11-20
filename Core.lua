@@ -3,7 +3,7 @@
 
 local ADDON_NAME = ...
 local PREFIX = "LootSup"
-local VERSION = "0.4.0"
+local VERSION = "0.4.1"
 local KILL_WINDOW = 180 -- seconds a kill stays open for loot and whispers
 local HINT_TIME = 120 -- seconds the reminder stays up after a kill
 local TARGET_HINT_TIME = 20 -- seconds for a reminder raised by targeting a corpse
@@ -659,15 +659,100 @@ local function djBossNpc(encounterID, name)
 	return found
 end
 
+-- every boss of level 55 or higher drops a Tarnished Undermine Real (user, 2026-11-20)
+local REAL = 3469
+local REAL_MIN_LEVEL = 55
+
+-- a unit's level; a skull (-1) counts as 3 above the player
+local function levelOf(unit)
+	local lvl = UnitLevel and plain(UnitLevel(unit))
+	if type(lvl) ~= "number" then
+		return nil
+	end
+	if lvl < 0 then
+		local mine = plain(UnitLevel("player"))
+		return type(mine) == "number" and mine + 3 or nil
+	end
+	return lvl
+end
+
 -- creatures in the boss frames during an encounter (boss1..boss5), if the game sets them
-local engaged = {}
+local engaged, engagedLevel = {}, nil
 local function noteBossUnits()
 	for i = 1, 5 do
-		local npc = npcIdOf(UnitGUID and plain(UnitGUID("boss" .. i)))
+		local unit = "boss" .. i
+		local npc = npcIdOf(UnitGUID and plain(UnitGUID(unit)))
 		if npc then
 			engaged[npc] = true
+			local lvl = levelOf(unit)
+			if lvl and lvl > (engagedLevel or 0) then
+				engagedLevel = lvl
+			end
 		end
 	end
+end
+
+-- boss level from DungeonJournal's BOSS_LEVELS ("57", "24-25": the first number)
+local function djBossLevel(encounterID, name)
+	local ns = _G.ForeverDungeonJournal_NS
+	if type(ns) ~= "table" or type(ns.BOSS_LEVELS) ~= "table" then
+		return nil
+	end
+	local names, dungeon = {}, nil
+	local known = type(ns.RUNLOG_ENCOUNTERS) == "table" and encounterID and ns.RUNLOG_ENCOUNTERS[encounterID]
+	if type(known) == "table" then
+		dungeon = known[1]
+		if type(known[2]) == "string" then
+			names[known[2]:lower()] = true
+		end
+	end
+	if type(name) == "string" then
+		names[name:lower()] = true
+	end
+	local found
+	for dname, bosses in pairs(ns.BOSS_LEVELS) do
+		if type(bosses) == "table" then
+			for bname, lvl in pairs(bosses) do
+				local n = tonumber(tostring(lvl):match("%d+"))
+				if n and type(bname) == "string" and names[bname:lower()] then
+					if dname == dungeon then
+						return n
+					end
+					found = found or n
+				end
+			end
+		end
+	end
+	return found
+end
+
+-- level of an encounter's boss: boss frames, a dead target of that name, DungeonJournal
+local function bossLevel(encounterID, name)
+	if engagedLevel then
+		return engagedLevel
+	end
+	local tname = UnitName and plain(UnitName("target"))
+	if name and tname and norm(tname) == norm(name) then
+		local lvl = levelOf("target")
+		if lvl then
+			return lvl
+		end
+	end
+	return djBossLevel(encounterID, name)
+end
+
+-- the Real's name and icon, before one was ever looted
+local function knowReal()
+	local meta = DB.currencies[REAL] or {}
+	if not meta.name and C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo then
+		local ok, info = pcall(C_CurrencyInfo.GetCurrencyInfo, REAL)
+		if ok and type(info) == "table" then
+			meta.name = plain(info.name)
+			meta.icon = plain(info.iconFileID)
+		end
+	end
+	meta.name = meta.name or "Tarnished Undermine Real"
+	DB.currencies[REAL] = meta
 end
 
 -- known encounters learn their creature from DungeonJournal (repairs data saved under the creature)
@@ -776,10 +861,13 @@ local function showHint(owner, name, curs, duration)
 end
 
 -- currency amounts this boss gave last time, for the reminder text
-local function knownCurs(e)
+local function knownCurs(e, expect)
 	local curs = {}
 	for cid, c in pairs(e and e.cur or {}) do
 		curs[cid] = c.last or true
+	end
+	for cid in pairs(expect or {}) do
+		curs[cid] = curs[cid] or true
 	end
 	return curs
 end
@@ -1043,7 +1131,7 @@ local function whisperPass(k)
 	local cid = next(k.cur)
 	if not cid then
 		local e = DB.bosses[k.key]
-		cid = e and next(e.cur)
+		cid = e and next(e.cur) or next(k.expect or {})
 	end
 	local what = cid and currencyName(cid) or "currency"
 	local msg = string.format("[Loot Supervisor] Loot %s: %s is waiting for you.", k.name or "the boss", what)
@@ -1076,7 +1164,7 @@ local function tick()
 	for _, k in ipairs(kills) do
 		if not k.whisperDone and t - k.t >= DB.delay then
 			local e = DB.bosses[k.key]
-			local known = k.hasCur or (not k.selfLooted and hasCur(e))
+			local known = k.hasCur or (not k.selfLooted and (hasCur(e) or k.expect))
 			if known then
 				k.whisperDone = true
 				whisperPass(k)
@@ -1168,6 +1256,12 @@ local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 		linkNpc(npc, key)
 	end
 	engaged = {}
+	local level = bossLevel(encounterID, e.name)
+	engagedLevel = nil
+	if level and level >= REAL_MIN_LEVEL then
+		knowReal()
+		k.expect = { [REAL] = true }
+	end
 	local djNpc = djBossNpc(encounterID, e.name)
 	if djNpc and not DB.links[djNpc] then
 		linkNpc(djNpc, key)
@@ -1179,8 +1273,8 @@ local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 		end
 	end
 	applyRecent(k)
-	if DB.hint == "all" or (DB.hint == "known" and hasCur(e)) then
-		showHint(k, e.name, knownCurs(e))
+	if DB.hint == "all" or (DB.hint == "known" and (hasCur(e) or k.expect)) then
+		showHint(k, e.name, knownCurs(e, k.expect))
 	end
 end
 
@@ -1437,7 +1531,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		return
 	end
 	if event == "ENCOUNTER_START" then
-		engaged = {}
+		engaged, engagedLevel = {}, nil
 		noteBossUnits()
 	elseif event == "INSTANCE_ENCOUNTER_ENGAGE_UNIT" then
 		noteBossUnits()

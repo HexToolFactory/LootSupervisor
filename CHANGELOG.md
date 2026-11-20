@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+- Every boss of level 55 or higher counts as a Tarnished Undermine Real dropper, already on its first kill:
+  the loot reminder shows and the group gets whispered without anyone having looted one before.
+  The level comes from the boss frames, your dead target or DungeonJournal's boss list.
+
 ## 0.4.0
 - Log window: `/lsup` or the addon menu on the minimap. Kills are grouped per activity (one instance visit),
   newest first; click an activity to fold it. Pick a kill to see every item, who won it, all rolls and your currency.
