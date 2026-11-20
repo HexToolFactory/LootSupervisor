@@ -2,8 +2,9 @@
 
 ## 0.3.0
 - First public version for WoW: Forever.
-- Kill log: date, boss, instance, every item that dropped, who got it and the roll. `/lsup log`, `/lsup log 20`,
-  `/lsup log <boss>`. Keeps the last 500 kills.
+- Kill log: date, boss, instance, every item that dropped, who got it and the winning roll. `/lsup log`,
+  `/lsup log 20`, `/lsup log <boss>`. Keeps the last 500 kills.
+- Every roll per item: Need, Greed, Transmog, Disenchant, Pass, with the number, highest first.
 - Items and winners come from the game's roll history, the boss loot window and the loot lines in chat
   (any client language).
 - Currency per boss: which boss dropped which currency, how much, in how many kills. `/lsup`

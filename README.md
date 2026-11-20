@@ -4,7 +4,7 @@ A World of Warcraft: Forever addon that keeps a log of every boss kill - date, i
 boss drops which currency, reminds you to loot it, and whispers group members who forgot.
 
 ## Kill log
-Every boss kill is saved with date, time, boss, instance, each item that dropped, who got it and the roll.
+Every boss kill is saved with date, time, boss, instance, each item that dropped, who got it and everyone's roll.
 
 ```
 /lsup log            last 5 kills
@@ -15,16 +15,19 @@ Every boss kill is saved with date, time, boss, instance, each item that dropped
 ```
 2026-11-20 21:14 Ragnaros - Molten Core
    [Bonereaver's Edge] > Anna Berg (87)
+      Need: Anna Berg 87, Cid Moss 45 | Greed: Bob Stone 30 | Pass: 4
    [Choker of the Fire Lord] > Bob Stone
    2x Tarnished Undermine Real > you
 ```
 
+Rolls are listed per kind (Need, Greed, Transmog, Disenchant, Pass), highest first. More than three passes show as a count.
+
 Item links in the log are clickable. The last 500 kills are kept.
 
 Where the data comes from:
-- the game's roll history (item, winner, roll),
+- the game's roll history (item, winner, every roll),
 - the boss loot window when you open it,
-- the "won" / "receives loot" lines in chat, read in your client's language (master loot included).
+- the roll, "won" and "receives loot" lines in chat, read in your client's language (master loot included).
 
 ## Currency per boss
 `/lsup` lists every boss that dropped a currency for you: amount and in how many kills.

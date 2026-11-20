@@ -211,7 +211,27 @@ local function corpseItems(rec, links)
 	rec.corpse = true
 end
 
--- one drop of the game's loot history (rolls): item, winner, roll
+-- Enum.EncounterLootDropRollState
+local ROLL_STATE = { [0] = "Need", [1] = "Need (off)", [2] = "Transmog", [3] = "Greed", [4] = "No roll", [5] = "Pass" }
+
+-- one player's roll on an item, replaced when the same player shows up again
+local function addRoll(it, name, kind, roll)
+	local key = norm(name)
+	if not key then
+		return
+	end
+	it.rolls = it.rolls or {}
+	for _, r in ipairs(it.rolls) do
+		if sameName(norm(r.name), key) then
+			r.kind = kind or r.kind
+			r.roll = roll or r.roll
+			return
+		end
+	end
+	it.rolls[#it.rolls + 1] = { name = name, kind = kind, roll = roll }
+end
+
+-- one drop of the game's loot history (rolls): item, winner, every roll
 local function historyDrop(rec, info)
 	local link = plain(info.itemHyperlink)
 	local id = itemIdOf(link)
@@ -247,6 +267,43 @@ local function historyDrop(rec, info)
 		it.roll = plain(winner.roll)
 		it.how = "roll"
 	end
+	if type(info.rollInfos) == "table" then
+		for _, r in ipairs(info.rollInfos) do
+			if type(r) == "table" then
+				local name = plain(r.playerName)
+				if name then
+					addRoll(it, name, ROLL_STATE[plain(r.state)] or "?", plain(r.roll))
+				end
+			end
+		end
+	end
+end
+
+-- the item entry a chat line is about; a new one only for rare+ items when the boss loot was not seen
+local function chatEntry(rec, link)
+	local id = itemIdOf(link)
+	if not id then
+		return nil
+	end
+	for _, e in ipairs(rec.items) do
+		if e.id == id then
+			return e
+		end
+	end
+	if rec.corpse or qualityOf(link) < 3 then
+		return nil
+	end
+	local e = { link = link, id = id }
+	rec.items[#rec.items + 1] = e
+	return e
+end
+
+-- a "Need Roll - 87 for [item] by X" / "X passed on: [item]" chat line
+local function chatRoll(rec, link, who, kind, roll)
+	local it = chatEntry(rec, link)
+	if it then
+		addRoll(it, who, kind, roll)
+	end
 end
 
 -- a "won" / "receives loot" chat line; items not seen on the boss only when rare or better
@@ -264,6 +321,11 @@ local function chatItem(rec, link, who, how)
 	for _, e in ipairs(rec.items) do
 		if e.id == id and not e.winner then
 			e.winner, e.how = who, e.how or how
+			for _, r in ipairs(e.rolls or {}) do
+				if sameName(norm(r.name), whoKey) then
+					e.roll = r.roll
+				end
+			end
 			return
 		end
 	end
@@ -289,7 +351,14 @@ local function fmtPattern(fmt)
 	return "^" .. p .. "$", order
 end
 
+-- { global, English fallback, about you, how, fields in argument order, roll kind }
 local LOOT_LINES = {
+	{ "LOOT_ROLL_ROLLED_NEED_ROLE_BONUS", "Need Roll - %d for %s by %s + Role Bonus", false, "roll", { "roll", "item", "who" }, "Need" },
+	{ "LOOT_ROLL_ROLLED_NEED", "Need Roll - %d for %s by %s", false, "roll", { "roll", "item", "who" }, "Need" },
+	{ "LOOT_ROLL_ROLLED_GREED", "Greed Roll - %d for %s by %s", false, "roll", { "roll", "item", "who" }, "Greed" },
+	{ "LOOT_ROLL_ROLLED_DE", "Disenchant Roll - %d for %s by %s", false, "roll", { "roll", "item", "who" }, "Disenchant" },
+	{ "LOOT_ROLL_PASSED_SELF", "You passed on: %s", true, "roll", { "item" }, "Pass" },
+	{ "LOOT_ROLL_PASSED", "%s passed on: %s", false, "roll", { "who", "item" }, "Pass" },
 	{ "LOOT_ROLL_YOU_WON", "You won: %s", true, "roll", { "item" } },
 	{ "LOOT_ROLL_WON", "%s won: %s", false, "roll", { "who", "item" } },
 	{ "LOOT_ITEM_SELF_MULTIPLE", "You receive loot: %sx%d.", true, "loot", { "item", "n" } },
@@ -305,14 +374,15 @@ local function parseLootLine(text)
 		for _, def in ipairs(LOOT_LINES) do
 			local pattern, order = fmtPattern(_G[def[1]] or def[2])
 			if pattern then
-				lootPatterns[#lootPatterns + 1] = { pattern = pattern, order = order, self = def[3], how = def[4], fields = def[5] }
+				lootPatterns[#lootPatterns + 1] =
+					{ pattern = pattern, order = order, self = def[3], how = def[4], fields = def[5], kind = def[6] }
 			end
 		end
 	end
 	for _, lp in ipairs(lootPatterns) do
 		local caps = { text:match(lp.pattern) }
 		if #caps > 0 then
-			local out = { how = lp.how }
+			local out = { how = lp.how, kind = lp.kind }
 			for j, value in ipairs(caps) do
 				local field = lp.fields[lp.order[j] or j]
 				if field then
@@ -987,7 +1057,11 @@ local function onItemChat(text)
 	end
 	local line = parseLootLine(text)
 	if line and line.item and line.who then
-		chatItem(rec, line.item, line.who, line.how)
+		if line.kind then
+			chatRoll(rec, line.item, line.who, line.kind, tonumber(line.roll))
+		else
+			chatItem(rec, line.item, line.who, line.how)
+		end
 	end
 end
 
@@ -1129,7 +1203,40 @@ local function list()
 	end
 end
 
--- newest kills first: date, boss, place; one line per item with who got it; your currency
+-- "Need: Anna Berg 87, Bob Stone 45 | Greed: Cid 12 | Pass: 3": highest roll first, many passes as a count
+local ROLL_ORDER = { "Need", "Need (off)", "Greed", "Transmog", "Disenchant", "Pass", "No roll", "?" }
+local function rollsText(rolls)
+	if not rolls or #rolls == 0 then
+		return nil
+	end
+	local groups = {}
+	for _, r in ipairs(rolls) do
+		local kind = r.kind or "?"
+		groups[kind] = groups[kind] or {}
+		table.insert(groups[kind], r)
+	end
+	local parts = {}
+	for _, kind in ipairs(ROLL_ORDER) do
+		local list = groups[kind]
+		if list then
+			table.sort(list, function(a, b)
+				return (a.roll or -1) > (b.roll or -1)
+			end)
+			local names = {}
+			if (kind == "Pass" or kind == "No roll") and #list > 3 then
+				names[1] = tostring(#list)
+			else
+				for _, r in ipairs(list) do
+					names[#names + 1] = r.name .. (r.roll and (" " .. r.roll) or "")
+				end
+			end
+			parts[#parts + 1] = kind .. ": " .. table.concat(names, ", ")
+		end
+	end
+	return table.concat(parts, " | ")
+end
+
+-- newest kills first: date, boss, place; one line per item with who got it and the rolls; your currency
 local function showLog(count, filter)
 	local shown = 0
 	for i = #DB.log, 1, -1 do
@@ -1143,6 +1250,10 @@ local function showLog(count, filter)
 					who = it.winner .. (it.roll and (" (" .. it.roll .. ")") or "")
 				end
 				print("   " .. (it.link or ("item:" .. it.id)) .. " > " .. who)
+				local rolls = rollsText(it.rolls)
+				if rolls then
+					print("      " .. rolls)
+				end
 			end
 			for cid, amount in pairs(r.cur) do
 				print("   " .. amount .. "x " .. currencyName(cid) .. " > you")
