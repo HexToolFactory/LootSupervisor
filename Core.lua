@@ -3,13 +3,14 @@
 
 local ADDON_NAME = ...
 local PREFIX = "LootSup"
-local VERSION = "0.3.1"
+local VERSION = "0.4.0"
 local KILL_WINDOW = 180 -- seconds a kill stays open for loot and whispers
 local HINT_TIME = 120 -- seconds the reminder stays up after a kill
 local TARGET_HINT_TIME = 20 -- seconds for a reminder raised by targeting a corpse
 local SEND_RETRY = 60 -- seconds a blocked message is retried
 
 local DB
+local onTick -- set by the log window
 local DEFAULTS = { whisper = "all", hint = "known", delay = 15 }
 
 local function say(msg)
@@ -310,7 +311,7 @@ end
 local ROLL_STATE = { [0] = "Need", [1] = "Need (off)", [2] = "Transmog", [3] = "Greed", [4] = "No roll", [5] = "Pass" }
 
 -- one player's roll on an item, replaced when the same player shows up again
-local function addRoll(it, name, kind, roll)
+local function addRoll(it, name, kind, roll, class)
 	local key = norm(name)
 	if not key then
 		return
@@ -320,10 +321,11 @@ local function addRoll(it, name, kind, roll)
 		if sameName(norm(r.name), key) then
 			r.kind = kind or r.kind
 			r.roll = roll or r.roll
+			r.class = class or r.class
 			return
 		end
 	end
-	it.rolls[#it.rolls + 1] = { name = name, kind = kind, roll = roll }
+	it.rolls[#it.rolls + 1] = { name = name, kind = kind, roll = roll, class = class }
 end
 
 -- one drop of the game's loot history (rolls): item, winner, every roll
@@ -359,6 +361,7 @@ local function historyDrop(rec, info)
 		it.winner, it.how = "all passed", "roll"
 	elseif type(winner) == "table" then
 		it.winner = plain(winner.playerName) or it.winner
+		it.winnerClass = plain(winner.playerClass) or it.winnerClass
 		it.roll = plain(winner.roll)
 		it.how = "roll"
 	end
@@ -367,7 +370,7 @@ local function historyDrop(rec, info)
 			if type(r) == "table" then
 				local name = plain(r.playerName)
 				if name then
-					addRoll(it, name, ROLL_STATE[plain(r.state)] or "?", plain(r.roll))
+					addRoll(it, name, ROLL_STATE[plain(r.state)] or "?", plain(r.roll), plain(r.playerClass))
 				end
 			end
 		end
@@ -884,6 +887,21 @@ local function groupUnits()
 	return units
 end
 
+-- class of every group member, so names in the log can be class-colored later (chat rolls carry no class)
+local function rememberClasses()
+	DB.classes = DB.classes or {}
+	local units = groupUnits()
+	units[#units + 1] = "player"
+	for _, unit in ipairs(units) do
+		local name = GetUnitName and plain(GetUnitName(unit, true))
+		local class = UnitClass and plain(select(2, UnitClass(unit)))
+		local key = norm(name)
+		if key and type(class) == "string" then
+			DB.classes[key] = class
+		end
+	end
+end
+
 -- among group members with the addon (and me) only the first name alphabetically whispers
 local function iAmSender(members)
 	local me = myName()
@@ -963,6 +981,9 @@ end
 ---------------------------------------------------------------------------------------------------------
 
 local function tick()
+	if onTick then
+		onTick()
+	end
 	local t = now()
 	-- whispers
 	for _, k in ipairs(kills) do
@@ -1299,6 +1320,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		DB.currencies = DB.currencies or {}
 		DB.links = DB.links or {}
 		DB.log = DB.log or {}
+		DB.classes = DB.classes or {}
 		DB.diag = DB.diag or {}
 		DB.diag.encounters = DB.diag.encounters or {}
 		DB.diag.history = DB.diag.history or {}
@@ -1336,6 +1358,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		checkCorpse("mouseover")
 	elseif event == "PLAYER_ENTERING_WORLD" or event == "GROUP_ROSTER_UPDATE" then
 		hello(false)
+		rememberClasses()
 	end
 end)
 
@@ -1343,35 +1366,55 @@ end)
 -- /lsup
 ---------------------------------------------------------------------------------------------------------
 
-local function list()
+-- one row per boss and currency, sorted by boss
+local function currencyRows()
 	local rows = {}
 	for key, e in pairs(DB.bosses) do
 		if hasCur(e) then
 			for cid, d in pairs(e.cur) do
-				rows[#rows + 1] = string.format(
-					"%s: %dx %s in %d/%d kills",
-					e.name or key,
-					d.total,
-					currencyName(cid),
-					d.drops,
-					math.max(e.kills, e.loots, d.drops)
-				)
+				rows[#rows + 1] = {
+					boss = e.name or key,
+					cid = cid,
+					total = d.total,
+					drops = d.drops,
+					kills = math.max(e.kills, e.loots, d.drops),
+				}
 			end
 		end
 	end
-	table.sort(rows)
+	table.sort(rows, function(a, b)
+		if a.boss ~= b.boss then
+			return a.boss < b.boss
+		end
+		return tostring(a.cid) < tostring(b.cid)
+	end)
+	return rows
+end
+
+local function list()
+	local rows = currencyRows()
 	if #rows == 0 then
 		say("no currency drops logged yet.")
 		return
 	end
-	for _, row in ipairs(rows) do
-		say(row)
+	for _, r in ipairs(rows) do
+		say(string.format("%s: %dx %s in %d/%d kills", r.boss, r.total, currencyName(r.cid), r.drops, r.kills))
 	end
+end
+
+-- a player name in its class color, when the class is known
+local function classColored(name, class)
+	class = class or (DB.classes and DB.classes[norm(name) or ""])
+	local c = class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
+	if c and c.colorStr then
+		return "|c" .. c.colorStr .. name .. "|r"
+	end
+	return name
 end
 
 -- "Need: Anna Berg 87, Bob Stone 45 | Greed: Cid 12 | Pass: 3": highest roll first, many passes as a count
 local ROLL_ORDER = { "Need", "Need (off)", "Greed", "Transmog", "Disenchant", "Pass", "No roll", "?" }
-local function rollsText(rolls)
+local function rollsText(rolls, colored)
 	if not rolls or #rolls == 0 then
 		return nil
 	end
@@ -1393,7 +1436,8 @@ local function rollsText(rolls)
 				names[1] = tostring(#list)
 			else
 				for _, r in ipairs(list) do
-					names[#names + 1] = r.name .. (r.roll and (" " .. r.roll) or "")
+					local name = colored and classColored(r.name, r.class) or r.name
+					names[#names + 1] = name .. (r.roll and (" " .. r.roll) or "")
 				end
 			end
 			parts[#parts + 1] = kind .. ": " .. table.concat(names, ", ")
@@ -1437,11 +1481,846 @@ local function showLog(count, filter)
 	end
 end
 
+---------------------------------------------------------------------------------------------------------
+-- log window, in the look of DungeonJournal (rock frame, gold title strip, brown parchment panels,
+-- dungeon art and colors from DungeonJournal when it is loaded)
+---------------------------------------------------------------------------------------------------------
+
+local RUN_GAP = 2 * 3600 -- kills in the same zone less than 2 h apart are one activity
+local WHITE = "Interface\\Buttons\\WHITE8X8"
+local EDGE = "Interface\\Tooltips\\UI-Tooltip-Border"
+local SKULL = "Interface\\TargetingFrame\\UI-TargetingFrame-Skull"
+local QUESTION = "Interface\\Icons\\INV_Misc_QuestionMark"
+
+-- DungeonJournal's default palette (its "Hall of Thanes" theme)
+local BASE_THEME = {
+	border = { 0.52, 0.36, 0.16, 1 },
+	header = { 0.26, 0.18, 0.09, 0.94 },
+	row = { 0.14, 0.09, 0.045, 0.92 },
+	rowSelected = { 0.36, 0.22, 0.08, 0.95 },
+	lootRow = { 0.17, 0.11, 0.06, 0.94 },
+	title = { 1.00, 0.80, 0.34 },
+	text = { 0.93, 0.84, 0.66 },
+	muted = { 0.82, 0.74, 0.60 },
+}
+
+local ui -- built on first open
+
+local function djTable(name)
+	local ns = _G.ForeverDungeonJournal_NS
+	local t = type(ns) == "table" and ns[name]
+	return type(t) == "table" and t or nil
+end
+
+-- DungeonJournal key for a zone: exact, else its first wing ("Dire Maul" -> "Dire Maul: East")
+local function djKey(t, zone)
+	if not t or type(zone) ~= "string" then
+		return nil
+	end
+	if t[zone] ~= nil then
+		return zone
+	end
+	local best
+	for k in pairs(t) do
+		if type(k) == "string" and k:sub(1, #zone + 1) == zone .. ":" and (not best or k < best) then
+			best = k
+		end
+	end
+	return best
+end
+
+local function themeOf(zone)
+	local themes = djTable("THEMES")
+	local key = djKey(themes, zone)
+	return key and themes[key] or BASE_THEME
+end
+
+local function color(theme, field)
+	local c = theme[field] or BASE_THEME[field]
+	return c[1], c[2], c[3], c[4] or 1
+end
+
+local function artOf(zone)
+	local arts = djTable("DUNGEON_HOME_ART")
+	local key = djKey(arts, zone)
+	if not key then
+		return nil
+	end
+	local coords = djTable("DUNGEON_HOME_TEXCOORD")
+	return arts[key], coords and coords[key]
+end
+
+-- DungeonJournal's own fonts when it is loaded, else the stock ones
+local function font(name)
+	return _G["ForeverDJ_" .. name] and ("ForeverDJ_" .. name) or name
+end
+
+local function itemIcon(id)
+	local icon
+	if C_Item and C_Item.GetItemIconByID then
+		local ok, v = pcall(C_Item.GetItemIconByID, id)
+		icon = ok and plain(v) or nil
+	end
+	if not icon and GetItemIcon then
+		local ok, v = pcall(GetItemIcon, id)
+		icon = ok and plain(v) or nil
+	end
+	return icon or QUESTION
+end
+
+local function currencyIcon(cid)
+	if C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo then
+		local ok, info = pcall(C_CurrencyInfo.GetCurrencyInfo, cid)
+		if ok and type(info) == "table" and plain(info.iconFileID) then
+			return plain(info.iconFileID)
+		end
+	end
+	return QUESTION
+end
+
+local function linkName(link)
+	return type(link) == "string" and link:match("%[(.-)%]") or nil
+end
+
+-- consecutive kills in one zone, less than RUN_GAP apart; newest activity first, kills in kill order
+local function activities()
+	local acts, cur, last = {}, nil, nil
+	for _, r in ipairs(DB.log) do
+		local t = r.time or 0
+		if not cur or r.zone ~= cur.zone or t - last > RUN_GAP then
+			cur = { zone = r.zone, first = t, recs = {} }
+			cur.key = t .. ":" .. tostring(r.zone)
+			acts[#acts + 1] = cur
+		end
+		cur.recs[#cur.recs + 1] = r
+		cur.last = t
+		last = t
+	end
+	local out = {}
+	for i = #acts, 1, -1 do
+		out[#out + 1] = acts[i]
+	end
+	return out
+end
+
+-- search: boss, zone, item names, winners, roll names, currency names
+local function recMatches(r, q)
+	local function has(s)
+		return type(s) == "string" and s:lower():find(q, 1, true) ~= nil
+	end
+	if has(r.boss) or has(r.zone) or has(r.date) then
+		return true
+	end
+	for _, it in ipairs(r.items) do
+		if has(linkName(it.link)) or has(it.winner) then
+			return true
+		end
+		for _, roll in ipairs(it.rolls or {}) do
+			if has(roll.name) then
+				return true
+			end
+		end
+	end
+	for cid in pairs(r.cur) do
+		if has(currencyName(cid)) then
+			return true
+		end
+	end
+	return false
+end
+
+local function bestIcon(r)
+	local best, bestQ
+	for _, it in ipairs(r.items) do
+		local q = qualityOf(it.link) or 0
+		if not bestQ or q > bestQ then
+			best, bestQ = it, q
+		end
+	end
+	if best then
+		return itemIcon(best.id)
+	end
+	local cid = next(r.cur)
+	return cid and currencyIcon(cid) or SKULL
+end
+
+local function backdrop(f, bg, edge, size, inset)
+	f:SetBackdrop({
+		bgFile = bg,
+		edgeFile = edge,
+		tile = true,
+		tileSize = 16,
+		edgeSize = size,
+		insets = { left = inset, right = inset, top = inset, bottom = inset },
+	})
+end
+
+local function parchment(f, alpha)
+	local t = f:CreateTexture(nil, "BACKGROUND", nil, -2)
+	t:SetPoint("TOPLEFT", 3, -3)
+	t:SetPoint("BOTTOMRIGHT", -3, 3)
+	t:SetTexture("Interface\\QuestFrame\\QuestBG")
+	t:SetVertexColor(1, 0.94, 0.82)
+	t:SetAlpha(alpha)
+	return t
+end
+
+local function panel(parent, bg, border)
+	local p = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+	backdrop(p, WHITE, EDGE, 12, 3)
+	p:SetBackdropColor(bg[1], bg[2], bg[3], 0.94)
+	p:SetBackdropBorderColor(border[1], border[2], border[3], 1)
+	parchment(p, 0.13)
+	return p
+end
+
+local function line(parent, r, g, b, a)
+	local t = parent:CreateTexture(nil, "ARTWORK")
+	t:SetTexture(WHITE)
+	t:SetColorTexture(r, g, b, a)
+	t:SetHeight(1)
+	return t
+end
+
+local function scroller(parent, name, width)
+	local s = CreateFrame("ScrollFrame", name, parent, "UIPanelScrollFrameTemplate")
+	local c = CreateFrame("Frame", nil, s)
+	c:SetSize(width, 1)
+	s:SetScrollChild(c)
+	return s, c
+end
+
+local function textHeight(fs, fallback)
+	local h = fs:GetStringHeight()
+	return (type(h) == "number" and h > 0) and h or fallback
+end
+
+local function insertLink(link)
+	local insert = (ChatFrameUtil and ChatFrameUtil.InsertLink) or ChatEdit_InsertLink
+	if insert and link then
+		insert(link)
+	end
+end
+
+local refreshWindow
+
+---------------------------------------------------------------------------------------------------------
+-- rows
+---------------------------------------------------------------------------------------------------------
+
+local function rowButton(parent, w, h)
+	local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	b:SetSize(w, h)
+	backdrop(b, WHITE, EDGE, 10, 2)
+	b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	return b
+end
+
+-- activity card: dungeon art, zone, date, kill count; click folds it
+local function makeActivityRow(parent)
+	local b = rowButton(parent, 292, 50)
+	b.art = b:CreateTexture(nil, "BACKGROUND", nil, 1)
+	b.art:SetPoint("TOPLEFT", 3, -3)
+	b.art:SetPoint("BOTTOMRIGHT", -3, 3)
+	b.art:SetAlpha(0.55)
+	b.shade = b:CreateTexture(nil, "BACKGROUND", nil, 2)
+	b.shade:SetPoint("TOPLEFT", 3, -3)
+	b.shade:SetPoint("BOTTOMRIGHT", -3, 3)
+	b.shade:SetColorTexture(0, 0, 0, 0.35)
+	b.fold = b:CreateTexture(nil, "ARTWORK")
+	b.fold:SetSize(14, 14)
+	b.fold:SetPoint("LEFT", 9, 0)
+	b.zone = b:CreateFontString(nil, "OVERLAY", font("GameFontNormal"))
+	b.zone:SetPoint("TOPLEFT", 30, -9)
+	b.zone:SetPoint("RIGHT", -10, 0)
+	b.zone:SetJustifyH("LEFT")
+	b.zone:SetWordWrap(false)
+	b.sub = b:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	b.sub:SetPoint("TOPLEFT", b.zone, "BOTTOMLEFT", 0, -5)
+	b.sub:SetPoint("RIGHT", -10, 0)
+	b.sub:SetJustifyH("LEFT")
+	b.sub:SetWordWrap(false)
+	b:SetScript("OnClick", function(self)
+		ui.open[self.key] = not ui.open[self.key]
+		refreshWindow()
+	end)
+	b:SetScript("OnEnter", function(self)
+		self.shade:SetColorTexture(0, 0, 0, 0.15)
+	end)
+	b:SetScript("OnLeave", function(self)
+		self.shade:SetColorTexture(0, 0, 0, 0.35)
+	end)
+	return b
+end
+
+-- one kill: best item icon, boss, time and item count
+local function makeKillRow(parent)
+	local b = rowButton(parent, 280, 38)
+	b.icon = b:CreateTexture(nil, "ARTWORK")
+	b.icon:SetSize(28, 28)
+	b.icon:SetPoint("LEFT", 6, 0)
+	b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	b.name = b:CreateFontString(nil, "OVERLAY", font("GameFontNormal"))
+	b.name:SetPoint("TOPLEFT", b.icon, "TOPRIGHT", 9, -1)
+	b.name:SetPoint("RIGHT", -52, 0)
+	b.name:SetJustifyH("LEFT")
+	b.name:SetWordWrap(false)
+	b.sub = b:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	b.sub:SetPoint("TOPLEFT", b.name, "BOTTOMLEFT", 0, -3)
+	b.sub:SetPoint("RIGHT", -10, 0)
+	b.sub:SetJustifyH("LEFT")
+	b.sub:SetWordWrap(false)
+	b.time = b:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	b.time:SetPoint("TOPRIGHT", -9, -7)
+	b:SetScript("OnClick", function(self)
+		ui.selected = self.rec
+		refreshWindow()
+	end)
+	b:SetScript("OnEnter", function(self)
+		self:SetBackdropColor(color(self.theme, "rowSelected"))
+	end)
+	b:SetScript("OnLeave", function(self)
+		self:SetBackdropColor(color(self.theme, self.rec == ui.selected and "rowSelected" or "row"))
+	end)
+	return b
+end
+
+-- one item or currency in the details: icon, name, winner, rolls
+local function makeLootRow(parent)
+	local b = rowButton(parent, 412, 52)
+	b.icon = b:CreateTexture(nil, "ARTWORK")
+	b.icon:SetSize(36, 36)
+	b.icon:SetPoint("TOPLEFT", 8, -8)
+	b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	b.name = b:CreateFontString(nil, "OVERLAY", font("GameFontNormal"))
+	b.name:SetPoint("TOPLEFT", b.icon, "TOPRIGHT", 10, -1)
+	b.name:SetPoint("RIGHT", -10, 0)
+	b.name:SetJustifyH("LEFT")
+	b.name:SetWordWrap(false)
+	b.winner = b:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	b.winner:SetPoint("TOPLEFT", b.name, "BOTTOMLEFT", 0, -4)
+	b.winner:SetPoint("RIGHT", -10, 0)
+	b.winner:SetJustifyH("LEFT")
+	b.winner:SetWordWrap(false)
+	b.rolls = b:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	b.rolls:SetPoint("TOPLEFT", b.winner, "BOTTOMLEFT", 0, -4)
+	b.rolls:SetWidth(344)
+	b.rolls:SetJustifyH("LEFT")
+	b.rolls:SetWordWrap(true)
+	b:SetScript("OnEnter", function(self)
+		self:SetBackdropColor(color(self.theme, "rowSelected"))
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		if self.link then
+			GameTooltip:SetHyperlink(self.link)
+		elseif self.cid and GameTooltip.SetCurrencyByID then
+			GameTooltip:SetCurrencyByID(self.cid)
+		end
+		GameTooltip:Show()
+	end)
+	b:SetScript("OnLeave", function(self)
+		self:SetBackdropColor(color(self.theme, "lootRow"))
+		GameTooltip:Hide()
+	end)
+	b:SetScript("OnClick", function(self)
+		if IsModifiedClick and IsModifiedClick("CHATLINK") then
+			insertLink(self.link)
+		end
+	end)
+	return b
+end
+
+local function pooled(pool, make, parent, i)
+	local b = pool[i]
+	if not b then
+		b = make(parent)
+		pool[i] = b
+	end
+	b:Show()
+	return b
+end
+
+local function hideFrom(pool, n)
+	for i = n, #pool do
+		pool[i]:Hide()
+	end
+end
+
+local function styleRow(b, theme, field)
+	b.theme = theme
+	b:SetBackdropColor(color(theme, field))
+	b:SetBackdropBorderColor(color(theme, "border"))
+end
+
+---------------------------------------------------------------------------------------------------------
+-- filling the window
+---------------------------------------------------------------------------------------------------------
+
+local function fillList(acts, query)
+	local y, nAct, nKill = 0, 0, 0
+	ui.shownList = {}
+	for i, act in ipairs(acts) do
+		local recs = act.recs
+		if query then
+			recs = {}
+			for _, r in ipairs(act.recs) do
+				if recMatches(r, query) then
+					recs[#recs + 1] = r
+				end
+			end
+		end
+		if #recs > 0 then
+			if ui.open[act.key] == nil then
+				ui.open[act.key] = (i == 1)
+			end
+			local open = query ~= nil or ui.open[act.key]
+			local theme = themeOf(act.zone)
+			nAct = nAct + 1
+			local h = pooled(ui.actRows, makeActivityRow, ui.listChild, nAct)
+			h.key = act.key
+			styleRow(h, theme, "header")
+			local art, coords = artOf(act.zone)
+			if art then
+				h.art:SetTexture(art)
+				if coords then
+					h.art:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+				end
+				h.art:Show()
+			else
+				h.art:Hide()
+			end
+			h.fold:SetTexture(open and "Interface\\Buttons\\UI-MinusButton-Up" or "Interface\\Buttons\\UI-PlusButton-Up")
+			h.zone:SetText(act.zone or "Unknown place")
+			h.zone:SetTextColor(color(theme, "title"))
+			local first = act.recs[1]
+			local span = ""
+			if act.last - act.first >= 60 then
+				span = "-" .. date("%H:%M", act.last)
+			end
+			h.sub:SetText((first.date or "?") .. span .. "  |  " .. #act.recs .. (#act.recs == 1 and " kill" or " kills"))
+			h.sub:SetTextColor(color(theme, "text"))
+			h:ClearAllPoints()
+			h:SetPoint("TOPLEFT", 0, -y)
+			y = y + 54
+			ui.shownList[#ui.shownList + 1] = { kind = "activity", zone = act.zone, open = open }
+			if open then
+				for _, r in ipairs(recs) do
+					nKill = nKill + 1
+					local k = pooled(ui.killRows, makeKillRow, ui.listChild, nKill)
+					k.rec = r
+					styleRow(k, theme, r == ui.selected and "rowSelected" or "row")
+					k.icon:SetTexture(bestIcon(r))
+					k.name:SetText(r.boss or "?")
+					k.name:SetTextColor(color(theme, "title"))
+					local parts = {}
+					if #r.items > 0 then
+						parts[#parts + 1] = #r.items .. (#r.items == 1 and " item" or " items")
+					end
+					for cid, amount in pairs(r.cur) do
+						parts[#parts + 1] = amount .. "x " .. currencyName(cid)
+					end
+					k.sub:SetText(#parts > 0 and table.concat(parts, ", ") or "no loot seen")
+					k.sub:SetTextColor(color(theme, "muted"))
+					k.time:SetText(r.time and date("%H:%M", r.time) or "")
+					k.time:SetTextColor(color(theme, "muted"))
+					k:ClearAllPoints()
+					k:SetPoint("TOPLEFT", 12, -y)
+					y = y + 41
+					ui.shownList[#ui.shownList + 1] = { kind = "kill", boss = r.boss }
+				end
+			end
+			y = y + 4
+		end
+	end
+	hideFrom(ui.actRows, nAct + 1)
+	hideFrom(ui.killRows, nKill + 1)
+	ui.listChild:SetHeight(math.max(1, y))
+	ui.empty:SetShown(nAct == 0)
+	ui.empty:SetText(query and "No kill matches." or "No kills logged yet.")
+end
+
+local function fillDetails()
+	local r = ui.selected
+	local d = ui.details
+	ui.detailLines = {}
+	if not r then
+		d.boss:SetText("Loot Supervisor")
+		d.sub:SetText("Pick a kill on the left.")
+		d.stats:SetText("")
+		d.art:Hide()
+		hideFrom(ui.lootRows, 1)
+		d.none:Hide()
+		return
+	end
+	local theme = themeOf(r.zone)
+	d.boss:SetText(r.boss or "?")
+	d.boss:SetTextColor(color(theme, "title"))
+	d.sub:SetText((r.zone or "Unknown place") .. "  |  " .. (r.date or "?"))
+	d.sub:SetTextColor(color(theme, "text"))
+	local nCur = 0
+	for _ in pairs(r.cur) do
+		nCur = nCur + 1
+	end
+	d.stats:SetText(#r.items .. (#r.items == 1 and " item" or " items") .. (nCur > 0 and ("  |  " .. nCur .. " currency") or ""))
+	d.stats:SetTextColor(color(theme, "muted"))
+	local art, coords = artOf(r.zone)
+	if art then
+		d.art:SetTexture(art)
+		if coords then
+			d.art:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+		end
+		d.art:Show()
+	else
+		d.art:Hide()
+	end
+
+	local y, n = 0, 0
+	local function place(b, h)
+		b:SetHeight(h)
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", 0, -y)
+		y = y + h + 4
+	end
+	for _, it in ipairs(r.items) do
+		n = n + 1
+		local b = pooled(ui.lootRows, makeLootRow, ui.detailChild, n)
+		styleRow(b, theme, "lootRow")
+		b.link, b.cid = it.link or ("item:" .. it.id), nil
+		b.icon:SetTexture(itemIcon(it.id))
+		b.name:SetText(it.link or ("item " .. it.id))
+		b.name:SetTextColor(color(theme, "title"))
+		local who
+		if it.winner == "all passed" then
+			who = "All passed"
+		elseif it.winner then
+			who = "Won by " .. classColored(it.winner, it.winnerClass) .. (it.roll and ("  (" .. it.roll .. ")") or "")
+		else
+			who = "Winner not seen"
+		end
+		b.winner:SetText(who)
+		b.winner:SetTextColor(color(theme, "text"))
+		local rolls = rollsText(it.rolls, true)
+		b.rolls:SetText(rolls or "")
+		b.rolls:SetTextColor(color(theme, "muted"))
+		local h = 8 + 14 + 4 + textHeight(b.winner, 12)
+		if rolls then
+			h = h + 4 + textHeight(b.rolls, 12)
+		end
+		place(b, math.max(52, h + 8))
+		ui.detailLines[#ui.detailLines + 1] = (linkName(it.link) or tostring(it.id)) .. " > " .. who .. (rolls and (" ; " .. rolls) or "")
+	end
+	local cids = {}
+	for cid in pairs(r.cur) do
+		cids[#cids + 1] = cid
+	end
+	table.sort(cids, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	for _, cid in ipairs(cids) do
+		n = n + 1
+		local b = pooled(ui.lootRows, makeLootRow, ui.detailChild, n)
+		styleRow(b, theme, "lootRow")
+		b.link, b.cid = nil, cid
+		b.icon:SetTexture(currencyIcon(cid))
+		b.name:SetText(r.cur[cid] .. "x " .. currencyName(cid))
+		b.name:SetTextColor(color(theme, "title"))
+		b.winner:SetText("Looted by you")
+		b.winner:SetTextColor(color(theme, "text"))
+		b.rolls:SetText("")
+		place(b, 52)
+		ui.detailLines[#ui.detailLines + 1] = r.cur[cid] .. "x " .. currencyName(cid)
+	end
+	hideFrom(ui.lootRows, n + 1)
+	d.none:SetShown(n == 0)
+	ui.detailChild:SetHeight(math.max(1, y))
+end
+
+local function fillCurrency()
+	local rows = currencyRows()
+	ui.currencyLines = {}
+	for i, r in ipairs(rows) do
+		local b = pooled(ui.curRows, makeLootRow, ui.curChild, i)
+		styleRow(b, BASE_THEME, "lootRow")
+		b.link, b.cid = nil, r.cid
+		b:SetWidth(760)
+		b.icon:SetTexture(currencyIcon(r.cid))
+		b.name:SetText(r.boss)
+		b.name:SetTextColor(color(BASE_THEME, "title"))
+		local text = r.total .. "x " .. currencyName(r.cid) .. "  |  dropped in " .. r.drops .. " of " .. r.kills .. " kills"
+		b.winner:SetText(text)
+		b.winner:SetTextColor(color(BASE_THEME, "text"))
+		b.rolls:SetText("")
+		b:SetHeight(52)
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", 0, -(i - 1) * 56)
+		ui.currencyLines[#ui.currencyLines + 1] = r.boss .. ": " .. text
+	end
+	hideFrom(ui.curRows, #rows + 1)
+	ui.curChild:SetHeight(math.max(1, #rows * 56))
+	ui.curEmpty:SetShown(#rows == 0)
+end
+
+-- what the window shows, to skip rebuilding when nothing changed
+local function logSignature()
+	local parts = { #DB.log, ui.mode, ui.query or "" }
+	for i = math.max(1, #DB.log - 2), #DB.log do
+		local r = DB.log[i]
+		local rolls = 0
+		for _, it in ipairs(r.items) do
+			rolls = rolls + #(it.rolls or {}) + (it.winner and 1 or 0)
+		end
+		local cur = 0
+		for _, v in pairs(r.cur) do
+			cur = cur + v
+		end
+		parts[#parts + 1] = #r.items .. "/" .. rolls .. "/" .. cur
+	end
+	return table.concat(parts, ":")
+end
+
+refreshWindow = function()
+	if not ui then
+		return
+	end
+	local q = ui.query
+	ui.logTab:SetEnabled(ui.mode ~= "log")
+	ui.curTab:SetEnabled(ui.mode ~= "currency")
+	if ui.mode == "currency" then
+		ui.logPanels:Hide()
+		ui.curPanel:Show()
+		fillCurrency()
+		ui.count:SetText("")
+	else
+		ui.curPanel:Hide()
+		ui.logPanels:Show()
+		if ui.selected == nil and #DB.log > 0 then
+			ui.selected = DB.log[#DB.log]
+		end
+		local acts = activities()
+		fillList(acts, q)
+		fillDetails()
+		ui.count:SetText(#DB.log .. (#DB.log == 1 and " kill" or " kills") .. "  |  " .. #acts .. (#acts == 1 and " activity" or " activities"))
+	end
+	ui.sig = logSignature()
+end
+
+---------------------------------------------------------------------------------------------------------
+-- frame
+---------------------------------------------------------------------------------------------------------
+
+local function tabButton(parent, text, x)
+	local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+	b:SetSize(110, 24)
+	b:SetPoint("TOPLEFT", x, -52)
+	b:SetText(text)
+	return b
+end
+
+local function buildWindow()
+	ui = { open = {}, actRows = {}, killRows = {}, lootRows = {}, curRows = {}, mode = "log" }
+	local f = CreateFrame("Frame", "LootSupervisorFrame", UIParent, "BackdropTemplate")
+	ui.frame = f
+	f:SetSize(860, 560)
+	f:SetPoint("CENTER", 0, 10)
+	f:SetFrameStrata("DIALOG")
+	f:SetClampedToScreen(true)
+	f:SetMovable(true)
+	f:EnableMouse(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", function(self)
+		self:StartMoving()
+	end)
+	f:SetScript("OnDragStop", function(self)
+		self:StopMovingOrSizing()
+	end)
+	backdrop(f, "Interface\\FrameGeneral\\UI-Background-Rock", "Interface\\DialogFrame\\UI-DialogBox-Border", 24, 6)
+	f:SetBackdropColor(0.045, 0.042, 0.037, 0.99)
+
+	-- gold title strip
+	local strip = f:CreateTexture(nil, "BACKGROUND")
+	strip:SetTexture(WHITE)
+	strip:SetColorTexture(0.14, 0.10, 0.055, 0.96)
+	strip:SetPoint("TOPLEFT", 12, -10)
+	strip:SetPoint("TOPRIGHT", -12, -10)
+	strip:SetHeight(34)
+	local l1 = line(f, 0.68, 0.52, 0.20, 0.65)
+	l1:SetPoint("TOPLEFT", strip, "TOPLEFT")
+	l1:SetPoint("TOPRIGHT", strip, "TOPRIGHT")
+	local l2 = line(f, 0.68, 0.52, 0.20, 0.45)
+	l2:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT")
+	l2:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT")
+	local title = f:CreateFontString(nil, "OVERLAY", font("GameFontNormalLarge"))
+	title:SetPoint("TOP", 0, -18)
+	title:SetText("Loot Supervisor")
+	title:SetTextColor(0.96, 0.79, 0.25)
+	local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+	close:SetPoint("TOPRIGHT", -3, -3)
+
+	-- tabs, count, search
+	ui.logTab = tabButton(f, "Kill Log", 22)
+	ui.curTab = tabButton(f, "Currency", 136)
+	ui.logTab:SetScript("OnClick", function()
+		ui.mode = "log"
+		refreshWindow()
+	end)
+	ui.curTab:SetScript("OnClick", function()
+		ui.mode = "currency"
+		refreshWindow()
+	end)
+	ui.count = f:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	ui.count:SetPoint("LEFT", ui.curTab, "RIGHT", 14, 0)
+	ui.count:SetTextColor(0.82, 0.74, 0.60)
+
+	local search = CreateFrame("EditBox", nil, f, "BackdropTemplate")
+	ui.search = search
+	search:SetSize(240, 24)
+	search:SetPoint("TOPRIGHT", -24, -52)
+	search:SetAutoFocus(false)
+	search:SetFontObject(font("GameFontHighlight"))
+	search:SetTextInsets(8, 22, 0, 0)
+	backdrop(search, WHITE, EDGE, 10, 3)
+	search:SetBackdropColor(0.08, 0.06, 0.035, 0.92)
+	search:SetBackdropBorderColor(0.52, 0.36, 0.16, 1)
+	local hint = search:CreateFontString(nil, "OVERLAY", font("GameFontDisableSmall"))
+	hint:SetPoint("LEFT", 9, 0)
+	hint:SetText("Search boss, item, player")
+	local clear = CreateFrame("Button", nil, search, "UIPanelCloseButton")
+	clear:SetSize(20, 20)
+	clear:SetPoint("RIGHT", -1, 0)
+	clear:Hide()
+	clear:SetScript("OnClick", function()
+		search:SetText("")
+		search:ClearFocus()
+	end)
+	search:SetScript("OnTextChanged", function(self)
+		local text = (self:GetText() or ""):lower():match("^%s*(.-)%s*$")
+		ui.query = text ~= "" and text or nil
+		hint:SetShown(ui.query == nil)
+		clear:SetShown(ui.query ~= nil)
+		if ui.query then
+			ui.mode = "log"
+		end
+		refreshWindow()
+	end)
+	search:SetScript("OnEscapePressed", search.ClearFocus)
+	search:SetScript("OnEnterPressed", search.ClearFocus)
+
+	-- content area
+	local content = CreateFrame("Frame", nil, f, "BackdropTemplate")
+	content:SetPoint("TOPLEFT", 18, -84)
+	content:SetPoint("BOTTOMRIGHT", -18, 18)
+	backdrop(content, WHITE, EDGE, 14, 4)
+	content:SetBackdropColor(0.17, 0.12, 0.07, 0.96)
+	content:SetBackdropBorderColor(0.47, 0.34, 0.16, 1)
+	parchment(content, 0.18)
+
+	ui.logPanels = CreateFrame("Frame", nil, content)
+	ui.logPanels:SetAllPoints(content)
+
+	-- left: activities with their kills
+	local left = panel(ui.logPanels, { 0.19, 0.13, 0.07 }, { 0.39, 0.24, 0.08 })
+	left:SetPoint("TOPLEFT", 12, -12)
+	left:SetPoint("BOTTOMLEFT", 12, 12)
+	left:SetWidth(334)
+	local leftTitle = left:CreateFontString(nil, "OVERLAY", font("GameFontNormalLarge"))
+	leftTitle:SetPoint("TOPLEFT", 12, -10)
+	leftTitle:SetText("Activities")
+	leftTitle:SetTextColor(0.96, 0.79, 0.25)
+	local listScroll
+	listScroll, ui.listChild = scroller(left, "LootSupervisorListScroll", 294)
+	listScroll:SetPoint("TOPLEFT", 10, -38)
+	listScroll:SetPoint("BOTTOMRIGHT", -28, 10)
+	ui.empty = left:CreateFontString(nil, "OVERLAY", font("GameFontHighlight"))
+	ui.empty:SetPoint("TOP", 0, -60)
+
+	-- right: the picked kill
+	local right = panel(ui.logPanels, { 0.21, 0.15, 0.08 }, { 0.42, 0.27, 0.10 })
+	right:SetPoint("TOPLEFT", left, "TOPRIGHT", 12, 0)
+	right:SetPoint("BOTTOMRIGHT", -12, 12)
+	local d = {}
+	ui.details = d
+	d.art = right:CreateTexture(nil, "BACKGROUND", nil, -1)
+	d.art:SetPoint("TOPLEFT", 4, -4)
+	d.art:SetPoint("TOPRIGHT", -4, -4)
+	d.art:SetHeight(92)
+	d.art:SetAlpha(0.4)
+	d.boss = right:CreateFontString(nil, "OVERLAY", font("GameFontNormalHuge"))
+	d.boss:SetPoint("TOPLEFT", 16, -16)
+	d.boss:SetPoint("RIGHT", -16, 0)
+	d.boss:SetJustifyH("LEFT")
+	d.boss:SetWordWrap(false)
+	d.sub = right:CreateFontString(nil, "OVERLAY", font("GameFontHighlight"))
+	d.sub:SetPoint("TOPLEFT", d.boss, "BOTTOMLEFT", 0, -8)
+	d.sub:SetPoint("RIGHT", -16, 0)
+	d.sub:SetJustifyH("LEFT")
+	d.stats = right:CreateFontString(nil, "OVERLAY", font("GameFontHighlightSmall"))
+	d.stats:SetPoint("TOPLEFT", d.sub, "BOTTOMLEFT", 0, -6)
+	local divider = line(right, 0.48, 0.34, 0.16, 0.75)
+	divider:SetPoint("TOPLEFT", 12, -98)
+	divider:SetPoint("TOPRIGHT", -12, -98)
+	local detailScroll
+	detailScroll, ui.detailChild = scroller(right, "LootSupervisorDetailScroll", 412)
+	detailScroll:SetPoint("TOPLEFT", 10, -106)
+	detailScroll:SetPoint("BOTTOMRIGHT", -28, 10)
+	d.none = right:CreateFontString(nil, "OVERLAY", font("GameFontHighlight"))
+	d.none:SetPoint("TOP", 0, -130)
+	d.none:SetText("No loot seen for this kill.")
+
+	-- currency tab: one full-width panel
+	ui.curPanel = panel(content, { 0.19, 0.13, 0.07 }, { 0.39, 0.24, 0.08 })
+	ui.curPanel:SetPoint("TOPLEFT", 12, -12)
+	ui.curPanel:SetPoint("BOTTOMRIGHT", -12, 12)
+	local curTitle = ui.curPanel:CreateFontString(nil, "OVERLAY", font("GameFontNormalLarge"))
+	curTitle:SetPoint("TOPLEFT", 12, -10)
+	curTitle:SetText("Currency per boss")
+	curTitle:SetTextColor(0.96, 0.79, 0.25)
+	local curScroll
+	curScroll, ui.curChild = scroller(ui.curPanel, "LootSupervisorCurrencyScroll", 760)
+	curScroll:SetPoint("TOPLEFT", 10, -38)
+	curScroll:SetPoint("BOTTOMRIGHT", -28, 10)
+	ui.curEmpty = ui.curPanel:CreateFontString(nil, "OVERLAY", font("GameFontHighlight"))
+	ui.curEmpty:SetPoint("TOP", 0, -60)
+	ui.curEmpty:SetText("No currency drops logged yet.")
+	ui.curPanel:Hide()
+
+	f:SetScript("OnShow", refreshWindow)
+	f:Hide()
+end
+
+local function toggleWindow(mode)
+	if not ui then
+		buildWindow()
+	end
+	if mode then
+		ui.mode = mode
+	end
+	if ui.frame:IsShown() and not mode then
+		ui.frame:Hide()
+	else
+		ui.frame:Show()
+		refreshWindow()
+	end
+end
+
+-- called from the 1 s ticker: new kills and rolls show up while the window is open
+local function windowTick()
+	if ui and ui.frame:IsShown() and logSignature() ~= ui.sig then
+		refreshWindow()
+	end
+end
+
+onTick = windowTick
+
+function LootSupervisor_OnAddonCompartmentClick()
+	toggleWindow()
+end
+
 SLASH_LOOTSUPERVISOR1 = "/lsup"
 SLASH_LOOTSUPERVISOR2 = "/lootsupervisor"
 SlashCmdList.LOOTSUPERVISOR = function(input)
 	local cmd, arg = (input or ""):lower():match("^%s*(%S*)%s*(.-)%s*$")
-	if cmd == "" or cmd == "list" then
+	if cmd == "" or cmd == "window" then
+		toggleWindow()
+	elseif cmd == "list" or cmd == "currency" then
 		list()
 	elseif cmd == "log" then
 		local n = tonumber(arg)
@@ -1460,8 +2339,9 @@ SlashCmdList.LOOTSUPERVISOR = function(input)
 		showHint({ test = true }, "Test Boss", cid and { [cid] = 2 } or {}, 15)
 		say("reminder shown. Drag to move, right-click to close.")
 	else
-		say("/lsup - drops per boss")
-		say("/lsup log [n|boss] - kills, items, winners")
+		say("/lsup - log window")
+		say("/lsup currency - drops per boss")
+		say("/lsup log [n|boss] - kills in chat")
 		say("/lsup whisper all|addon|off (now " .. DB.whisper .. ")")
 		say("/lsup hint known|all|off (now " .. DB.hint .. ")")
 		say("/lsup delay <s> (now " .. DB.delay .. ")")
@@ -1470,4 +2350,13 @@ SlashCmdList.LOOTSUPERVISOR = function(input)
 end
 
 -- test hook
-LootSupervisor_Internal = { kills = kills, addonUsers = addonUsers, tick = tick }
+LootSupervisor_Internal = {
+	kills = kills,
+	addonUsers = addonUsers,
+	tick = tick,
+	activities = activities,
+	toggleWindow = toggleWindow,
+	ui = function()
+		return ui
+	end,
+}

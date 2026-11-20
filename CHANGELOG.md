@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+- Log window: `/lsup` or the addon menu on the minimap. Kills are grouped per activity (one instance visit),
+  newest first; click an activity to fold it. Pick a kill to see every item, who won it, all rolls and your currency.
+- Styled like DungeonJournal; with DungeonJournal loaded, activities show the dungeon art and colors.
+- Player names in class colors. Search box: boss, instance, item or player. Currency tab: drops per boss.
+- Shift-click an item to link it in chat. The window updates while open.
+- The currency list in chat moved to `/lsup currency`.
+
 ## 0.3.1
 - Fix: trash rolls ("Miscellaneous") were copied into a new log entry each time the game resent its roll history.
   Each roll is now logged once. Copies already saved by 0.3.0 are removed on the next login.

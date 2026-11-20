@@ -6,6 +6,13 @@ boss drops which currency, reminds you to loot it, and whispers group members wh
 ## Kill log
 Every boss kill is saved with date, time, boss, instance, each item that dropped, who got it and everyone's roll.
 
+`/lsup` (or the addon menu on the minimap) opens the log window. Kills are grouped per activity - one instance
+visit - newest first. Pick a kill to see its items, winners, rolls and your currency. Names are class-colored, the
+search box finds bosses, instances, items and players, and the Currency tab shows drops per boss. The window is
+styled like DungeonJournal and uses its dungeon art and colors when DungeonJournal is loaded.
+
+The log in chat:
+
 ```
 /lsup log            last 5 kills
 /lsup log 20         last 20 kills
@@ -30,7 +37,7 @@ Where the data comes from:
 - the roll, "won" and "receives loot" lines in chat, read in your client's language (master loot included).
 
 ## Currency per boss
-`/lsup` lists every boss that dropped a currency for you: amount and in how many kills.
+`/lsup currency` (or the Currency tab) lists every boss that dropped a currency for you: amount and in how many kills.
 
 ## Loot reminder
 After a kill of a boss that dropped currency before, a box with a bouncing arrow appears: "Loot Gallywix" with the
@@ -50,8 +57,9 @@ after 2 minutes, or on right-click. Drag it to move it. `/lsup test` shows it.
 ## Commands
 | Command | |
 |---|---|
-| `/lsup` | currency per boss |
-| `/lsup log [n or boss]` | kill log |
+| `/lsup` | log window |
+| `/lsup currency` | currency per boss in chat |
+| `/lsup log [n or boss]` | kill log in chat |
 | `/lsup whisper all\|addon\|off` | whom to whisper (default `all`) |
 | `/lsup hint known\|all\|off` | reminder after known currency bosses, every boss, or never |
 | `/lsup delay <seconds>` | wait before whispering (default 15) |
