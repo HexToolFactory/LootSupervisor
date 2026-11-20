@@ -7,9 +7,11 @@ boss drops which currency, reminds you to loot it, and whispers group members wh
 Every boss kill is saved with date, time, boss, instance, each item that dropped, who got it and everyone's roll.
 
 `/lsup` (or the addon menu on the minimap) opens the log window. Kills are grouped per activity - one instance
-visit - newest first. Pick a kill to see its items, winners, rolls and your currency. Names are class-colored, the
-search box finds bosses, instances, items and players, and the Currency tab shows drops per boss. The window is
-styled like DungeonJournal and uses its dungeon art and colors when DungeonJournal is loaded.
+visit - newest first. Pick a kill to see its items, winners, rolls and your currency. Names are class-colored.
+The Items tab lists every drop in a table (date, instance, boss, item, winner, roll) and the Currency tab the
+currency per boss; click any column header to sort, again to reverse. The search box takes a player or item name
+and filters the open tab. The window is styled like DungeonJournal and uses its dungeon art and colors when
+DungeonJournal is loaded.
 
 The log in chat:
 

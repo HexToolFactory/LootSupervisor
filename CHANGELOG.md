@@ -4,7 +4,11 @@
 - Log window: `/lsup` or the addon menu on the minimap. Kills are grouped per activity (one instance visit),
   newest first; click an activity to fold it. Pick a kill to see every item, who won it, all rolls and your currency.
 - Styled like DungeonJournal; with DungeonJournal loaded, activities show the dungeon art and colors.
-- Player names in class colors. Search box: boss, instance, item or player. Currency tab: drops per boss.
+- Player names in class colors.
+- Items tab: every drop in one table (date, instance, boss, item, winner, roll). Click a column to sort by it,
+  again to reverse. Click a row to open that kill.
+- Currency tab: boss, currency, amount, drops, kills and drop rate, sortable the same way.
+- Search box: type a player or item name. It filters the open tab; a kill then shows only the matching items.
 - Shift-click an item to link it in chat. The window updates while open.
 - The currency list in chat moved to `/lsup currency`.
 
