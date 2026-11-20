@@ -47,12 +47,13 @@ currency. It also appears when you target or mouse over a lootable corpse of suc
 after 2 minutes, or on right-click. Drag it to move it. `/lsup test` shows it.
 
 ## Group check
-15 seconds after the kill, group members who have not looted get a whisper:
+15 seconds after the kill, group members with Loot Supervisor who have not looted get a whisper:
 
 > [Loot Supervisor] Loot Gallywix: Tarnished Undermine Real is waiting for you.
 
-- Members with Loot Supervisor report their loot to each other.
-- Members without it count as looted when their currency line shows up in chat.
+- Members with Loot Supervisor report their loot to each other, so only those who really did not loot are told.
+- WoW: Forever shows no other player's currency loot in chat, so for members without the addon nobody can know.
+  They get no whisper by default; `/lsup whisper all` whispers them too, looted or not.
 - When several members have the addon, only one of them whispers.
 - Whispers wait while the game blocks chat (boss fights).
 
@@ -62,7 +63,7 @@ after 2 minutes, or on right-click. Drag it to move it. `/lsup test` shows it.
 | `/lsup` | log window |
 | `/lsup currency` | currency per boss in chat |
 | `/lsup log [n or boss]` | kill log in chat |
-| `/lsup whisper all\|addon\|off` | whom to whisper (default `all`) |
+| `/lsup whisper addon\|all\|off` | whom to whisper (default `addon`) |
 | `/lsup hint known\|all\|off` | reminder after known currency bosses, every boss, or never |
 | `/lsup delay <seconds>` | wait before whispering (default 15) |
 | `/lsup test` | show the reminder |

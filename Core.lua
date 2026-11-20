@@ -11,7 +11,8 @@ local SEND_RETRY = 60 -- seconds a blocked message is retried
 
 local DB
 local onTick -- set by the log window
-local DEFAULTS = { whisper = "all", hint = "known", delay = 15 }
+-- whisper "addon": Forever shows no other player's currency loot in chat, so only addon users can be known to have looted
+local DEFAULTS = { whisper = "addon", hint = "known", delay = 15 }
 
 local function say(msg)
 	print("|cffffd100Loot Supervisor|r: " .. msg)
@@ -1518,6 +1519,13 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		DB.diag.encounters = DB.diag.encounters or {}
 		DB.diag.history = DB.diag.history or {}
 		dedupeLog()
+		-- 0.4.1: the old default "all" whispered members who had looted; move it to "addon" once
+		if not DB.whisperV2 then
+			if DB.whisper == "all" then
+				DB.whisper = "addon"
+			end
+			DB.whisperV2 = true
+		end
 		for k, v in pairs(DEFAULTS) do
 			if DB[k] == nil then
 				DB[k] = v
@@ -2874,7 +2882,7 @@ SlashCmdList.LOOTSUPERVISOR = function(input)
 		say("/lsup - log window")
 		say("/lsup currency - drops per boss")
 		say("/lsup log [n|boss] - kills in chat")
-		say("/lsup whisper all|addon|off (now " .. DB.whisper .. ")")
+		say("/lsup whisper addon|all|off (now " .. DB.whisper .. ")")
 		say("/lsup hint known|all|off (now " .. DB.hint .. ")")
 		say("/lsup delay <s> (now " .. DB.delay .. ")")
 		say("/lsup test - show the reminder")
