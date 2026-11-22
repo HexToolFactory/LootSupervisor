@@ -3,7 +3,7 @@
 
 local ADDON_NAME = ...
 local PREFIX = "LootSup"
-local VERSION = "0.4.1"
+local VERSION = "0.5.0"
 local KILL_WINDOW = 180 -- seconds a kill stays open for loot and whispers
 local HINT_TIME = 120 -- seconds the reminder stays up after a kill
 local TARGET_HINT_TIME = 20 -- seconds for a reminder raised by targeting a corpse
@@ -660,86 +660,96 @@ local function djBossNpc(encounterID, name)
 	return found
 end
 
--- every boss of level 55 or higher drops a Tarnished Undermine Real (user, 2026-11-20)
+-- bosses that drop a Tarnished Undermine Real (once a day each): the Season of Discovery lists of 2024
+-- (Blizzard Watch) plus the Forever dungeon Blackmaw Hold, where every boss dropped one (kill log, 2026-11-20)
 local REAL = 3469
-local REAL_MIN_LEVEL = 55
-
--- a unit's level; a skull (-1) counts as 3 above the player
-local function levelOf(unit)
-	local lvl = UnitLevel and plain(UnitLevel(unit))
-	if type(lvl) ~= "number" then
-		return nil
-	end
-	if lvl < 0 then
-		local mine = plain(UnitLevel("player"))
-		return type(mine) == "number" and mine + 3 or nil
-	end
-	return lvl
+local REAL_BOSSES = {}
+for _, name in ipairs({
+	-- Dire Maul
+	"Pusillin", "Lethtendris", "Hydrospawn", "Zevrim Thornhoof", "Alzzin the Wildshaper", "King Gordok",
+	"Tendris Warpwood", "Magister Kalendris", "Illyanna Ravenoak", "Immol'thar", "Prince Tortheldrin",
+	-- Blackrock Depths
+	"Fineous Darkvire", "Bael'gar", "Lord Incendius", "Hurley Blackbreath", "Phalanx", "General Angerforge",
+	"Golem Lord Argelmach", "Ambassador Flamelash", "Magmus", "Emperor Dagran Thaurissan", "Emperor Thaurissan",
+	-- Blackrock Spire
+	"Highlord Omokk", "Shadow Hunter Vosh'gajin", "War Master Voone", "Mother Smolderweb", "Urok Doomhowl",
+	"Gizrul the Slavener", "Halycon", "Overlord Wyrmthalak", "Pyroguard Emberseer", "Warchief Rend Blackhand",
+	"The Beast", "General Drakkisath",
+	-- Scholomance
+	"Marduk Blackpool", "Vectus", "Doctor Theolen Krastinov", "Instructor Malicia", "Lorekeeper Polkelt",
+	"Lord Alexei Barov", "The Ravenian", "Lady Illucia Barov", "Kirtonos the Herald", "Kirtonos",
+	"Darkmaster Gandling", "Jandice Barov", "Rattlegore", "Ras Frostwhisper", "Ras Frostwhisperer",
+	-- Stratholme
+	"Ezra Grimm", "The Unforgiven", "Postmaster Malown", "Timmy the Cruel", "Malor the Zealous",
+	"Cannon Master Willey", "Archivist Galford", "Grand Crusader Dathrohan", "Balnazzar", "Magistrate Barthilas",
+	"Nerub'enkan", "Maleki the Pallid", "Baroness Anastari", "Ramstein the Gorger", "Baron Rivendare",
+	-- Blackmaw Hold (Forever)
+	"Impaan the Imprisoner", "Bonesnout the Unbroken", "Withermaw", "Unbound Spirit", "Elder Shaman Bloodmane",
+	"Blackmaw Behemoth", "Varrox Bleakhoof",
+	-- world and raid bosses
+	"Azuregos", "Lord Kazzak", "Onyxia",
+	"Lucifron", "Magmadar", "Gehennas", "Garr", "Shazzrah", "Baron Geddon", "Golemagg the Incinerator",
+	"Sulfuron Harbinger", "Majordomo Executus", "Ragnaros",
+	"Razorgore the Untamed", "Vaelastrasz the Corrupt", "Broodlord Lashlayer", "Firemaw", "Ebonroc", "Flamegor",
+	"Chromaggus", "Nefarian",
+	"High Priestess Jeklik", "High Priest Venoxis", "High Priestess Mar'li", "High Priest Thekal",
+	"High Priestess Arlokk", "Hakkar", "Bloodlord Mandokir", "Jin'do the Hexxer", "Gahz'ranka", "Gri'lek",
+	"Hazza'rah", "Renataki", "Wushoolay",
+}) do
+	REAL_BOSSES[name:lower()] = true
+end
+-- encounter IDs seen dropping one on Forever: any client language
+local REAL_ENCOUNTERS = {}
+for _, id in ipairs({
+	343, 344, 345, 346, 2792, -- Dire Maul East
+	2801, 2802, 2803, 2804, 2805, 2806, 2807, 2808, 2810, 2811, 2812, -- Scholomance
+	472, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483, 484, 2797, -- Stratholme
+	3062, 3063, 3068, 3069, -- Upper Blackrock Spire
+	3315, 3316, 3322, 3323, 3327, 3334, 3336, -- Blackmaw Hold
+}) do
+	REAL_ENCOUNTERS[id] = true
 end
 
 -- creatures in the boss frames during an encounter (boss1..boss5), if the game sets them
-local engaged, engagedLevel = {}, nil
+local engaged = {}
 local function noteBossUnits()
 	for i = 1, 5 do
-		local unit = "boss" .. i
-		local npc = npcIdOf(UnitGUID and plain(UnitGUID(unit)))
+		local npc = npcIdOf(UnitGUID and plain(UnitGUID("boss" .. i)))
 		if npc then
 			engaged[npc] = true
-			local lvl = levelOf(unit)
-			if lvl and lvl > (engagedLevel or 0) then
-				engagedLevel = lvl
-			end
 		end
 	end
 end
 
--- boss level from DungeonJournal's BOSS_LEVELS ("57", "24-25": the first number)
-local function djBossLevel(encounterID, name)
+-- does this encounter drop a Real: its ID, its name, or its English name from DungeonJournal's ID list
+local function dropsReal(encounterID, name)
+	if encounterID and REAL_ENCOUNTERS[encounterID] then
+		return true
+	end
+	if type(name) == "string" and REAL_BOSSES[name:lower()] then
+		return true
+	end
 	local ns = _G.ForeverDungeonJournal_NS
-	if type(ns) ~= "table" or type(ns.BOSS_LEVELS) ~= "table" then
-		return nil
-	end
-	local names, dungeon = {}, nil
-	local known = type(ns.RUNLOG_ENCOUNTERS) == "table" and encounterID and ns.RUNLOG_ENCOUNTERS[encounterID]
-	if type(known) == "table" then
-		dungeon = known[1]
-		if type(known[2]) == "string" then
-			names[known[2]:lower()] = true
-		end
-	end
-	if type(name) == "string" then
-		names[name:lower()] = true
-	end
-	local found
-	for dname, bosses in pairs(ns.BOSS_LEVELS) do
-		if type(bosses) == "table" then
-			for bname, lvl in pairs(bosses) do
-				local n = tonumber(tostring(lvl):match("%d+"))
-				if n and type(bname) == "string" and names[bname:lower()] then
-					if dname == dungeon then
-						return n
-					end
-					found = found or n
-				end
-			end
-		end
-	end
-	return found
+	local known = type(ns) == "table" and type(ns.RUNLOG_ENCOUNTERS) == "table" and encounterID and ns.RUNLOG_ENCOUNTERS[encounterID]
+	return type(known) == "table" and type(known[2]) == "string" and REAL_BOSSES[known[2]:lower()] == true
 end
 
--- level of an encounter's boss: boss frames, a dead target of that name, DungeonJournal
-local function bossLevel(encounterID, name)
-	if engagedLevel then
-		return engagedLevel
-	end
-	local tname = UnitName and plain(UnitName("target"))
-	if name and tname and norm(tname) == norm(name) then
-		local lvl = levelOf("target")
-		if lvl then
-			return lvl
+-- start of the current game day (daily reset); without the API: 20 h back
+local function dayStart()
+	if C_DateAndTime and C_DateAndTime.GetSecondsUntilDailyReset then
+		local ok, left = pcall(C_DateAndTime.GetSecondsUntilDailyReset)
+		left = ok and plain(left)
+		if type(left) == "number" then
+			return time() + left - 86400
 		end
 	end
-	return djBossLevel(encounterID, name)
+	return time() - 20 * 3600
+end
+
+-- you got this boss's Real already today: it drops once a day
+local function realToday(key)
+	local t = key and DB.realGot and DB.realGot[key]
+	return t ~= nil and t >= dayStart()
 end
 
 -- the Real's name and icon, before one was ever looted
@@ -943,6 +953,14 @@ local function recordCorpse(c)
 			d.total = d.total + amount
 			d.last = amount
 		end
+	end
+	-- the day's Real from this boss is taken
+	if c.cur[REAL] then
+		DB.realGot[key or ""] = time()
+		for _, k in ipairs(matching) do
+			DB.realGot[k.key] = time()
+		end
+		DB.realGot[""] = nil
 	end
 
 	-- kills and reminder
@@ -1257,9 +1275,9 @@ local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 		linkNpc(npc, key)
 	end
 	engaged = {}
-	local level = bossLevel(encounterID, e.name)
-	engagedLevel = nil
-	if level and level >= REAL_MIN_LEVEL then
+	if realToday(key) then
+		k.realDone = true -- your Real from this boss is looted already today
+	elseif dropsReal(encounterID, e.name) then
 		knowReal()
 		k.expect = { [REAL] = true }
 	end
@@ -1274,7 +1292,7 @@ local function onEncounterEnd(encounterID, encounterName, _, _, success, units)
 		end
 	end
 	applyRecent(k)
-	if DB.hint == "all" or (DB.hint == "known" and (hasCur(e) or k.expect)) then
+	if not k.realDone and (DB.hint == "all" or (DB.hint == "known" and (hasCur(e) or k.expect))) then
 		showHint(k, e.name, knownCurs(e, k.expect))
 	end
 end
@@ -1515,6 +1533,15 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		DB.links = DB.links or {}
 		DB.log = DB.log or {}
 		DB.classes = DB.classes or {}
+		-- when you last got each boss's Real; filled from the kill log the first time
+		if not DB.realGot then
+			DB.realGot = {}
+			for _, r in ipairs(DB.log) do
+				if r.enc and r.cur[3469] then
+					DB.realGot["e" .. r.enc] = r.time
+				end
+			end
+		end
 		DB.diag = DB.diag or {}
 		DB.diag.encounters = DB.diag.encounters or {}
 		DB.diag.history = DB.diag.history or {}
@@ -1539,7 +1566,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		return
 	end
 	if event == "ENCOUNTER_START" then
-		engaged, engagedLevel = {}, nil
+		engaged = {}
 		noteBossUnits()
 	elseif event == "INSTANCE_ENCOUNTER_ENGAGE_UNIT" then
 		noteBossUnits()

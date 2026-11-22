@@ -42,8 +42,10 @@ Where the data comes from:
 `/lsup currency` (or the Currency tab) lists every boss that dropped a currency for you: amount and in how many kills.
 
 ## Loot reminder
-After a kill of a boss that dropped currency before, a box with a bouncing arrow appears: "Loot Gallywix" with the
-currency. It also appears when you target or mouse over a lootable corpse of such a boss. It disappears when you loot,
+After a kill of a boss that drops currency, a box with a bouncing arrow appears: "Loot Gallywix" with the
+currency. Bosses that drop a Tarnished Undermine Real come from a built-in list (Dire Maul, Blackrock Depths,
+Blackrock Spire, Scholomance, Stratholme, Blackmaw Hold, world and raid bosses); any other boss counts once it
+dropped currency for you. A boss whose Real you already looted today shows no box. It also appears when you target or mouse over a lootable corpse of such a boss. It disappears when you loot,
 after 2 minutes, or on right-click. Drag it to move it. `/lsup test` shows it.
 
 ## Group check

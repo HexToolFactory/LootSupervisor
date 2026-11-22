@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+- Tarnished Undermine Real: a list of the bosses that drop it replaces the level 55+ rule, which also counted
+  bosses like High Interrogator Gerstahn and Lord Roccor. The list: Dire Maul, Blackrock Depths, Blackrock Spire,
+  Scholomance, Stratholme, Blackmaw Hold, world and raid bosses. A boss not on it counts once it drops one for you.
+- Once a day: after you looted a boss's Real, its next kill that day shows no reminder. Reals already in the kill
+  log count.
+
 ## 0.4.1
 - Every boss of level 55 or higher counts as a Tarnished Undermine Real dropper, already on its first kill:
   the loot reminder shows and the whisper check runs without anyone having looted one before.
