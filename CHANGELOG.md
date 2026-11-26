@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+- Kill log: every loot line in an instance is logged, whatever its quality: trash loot, keys, cloth and crates
+  that group members pick up land in the instance's "Miscellaneous" entry with who got them. Before, only rare
+  and better items of a boss kill were kept.
+- Stack sizes show (Runecloth x3), and loot without a roll reads "Looted by".
+- Your loot windows of trash mobs no longer add their items to a boss kill that rolled the same item
+  (Corruptor's Scourgestone, Runecloth).
+
 ## 0.5.0
 - Tarnished Undermine Real: a list of the bosses that drop it replaces the level 55+ rule, which also counted
   bosses like High Interrogator Gerstahn and Lord Roccor. The list: Dire Maul, Blackrock Depths, Blackrock Spire,

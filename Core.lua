@@ -3,7 +3,7 @@
 
 local ADDON_NAME = ...
 local PREFIX = "LootSup"
-local VERSION = "0.5.0"
+local VERSION = "0.6.0"
 local KILL_WINDOW = 180 -- seconds a kill stays open for loot and whispers
 local HINT_TIME = 120 -- seconds the reminder stays up after a kill
 local TARGET_HINT_TIME = 20 -- seconds for a reminder raised by targeting a corpse
@@ -179,6 +179,22 @@ local function logKill(boss, encounterID)
 	return rec
 end
 
+-- trash loot: the game's roll history files it under encounter 0 ("Miscellaneous"); chat lines too
+local MISC = "Miscellaneous"
+
+local function isMisc(rec)
+	return rec.enc == 0 or rec.boss == MISC
+end
+
+local function inInstance()
+	if not GetInstanceInfo then
+		return false
+	end
+	local _, kind = GetInstanceInfo()
+	kind = plain(kind)
+	return type(kind) == "string" and kind ~= "" and kind ~= "none"
+end
+
 -- the newest logged kill still taking loot (of this encounter, if given)
 local function openRec(encounterID)
 	local t = time()
@@ -249,8 +265,8 @@ end
 local recentCorpses = {} -- { items = { [link] = slots }, cur, ids = { [itemID] = true }, t, recs = { [rec] = true } }
 
 local function giveCorpse(rec, corpse)
-	if corpse.recs[rec] then
-		return
+	if next(corpse.recs) or not corpse.boss or isMisc(rec) then
+		return -- a window is one kill; trash windows stay out (their items come from the loot lines)
 	end
 	corpse.recs[rec] = true
 	corpseItems(rec, corpse.items)
@@ -274,7 +290,7 @@ local function attachCorpses(rec, itemID)
 end
 
 -- a loot window: remembered, and given to a logged kill whose roll history already holds one of its items
-local function rememberCorpse(c, ownerRec)
+local function rememberCorpse(c, ownerRec, boss)
 	local ids = {}
 	for link in pairs(c.items or {}) do
 		local id = itemIdOf(link)
@@ -282,7 +298,7 @@ local function rememberCorpse(c, ownerRec)
 			ids[id] = true
 		end
 	end
-	local corpse = { items = c.items or {}, cur = c.cur or {}, ids = ids, t = now(), recs = {} }
+	local corpse = { items = c.items or {}, cur = c.cur or {}, ids = ids, t = now(), recs = {}, boss = boss }
 	if ownerRec then
 		corpse.recs[ownerRec] = true
 	end
@@ -379,18 +395,50 @@ local function historyDrop(rec, info)
 	attachCorpses(rec, id)
 end
 
--- the item entry a chat line is about; a new one only for rare+ items when the boss loot was not seen
-local function chatEntry(rec, link)
-	local id = itemIdOf(link)
-	if not id then
-		return nil
-	end
-	for _, e in ipairs(rec.items) do
-		if e.id == id then
-			return e
+-- records of this zone still taking loot, newest first
+local function recentRecs()
+	local out, t, zone = {}, time(), instanceName()
+	for i = #DB.log, 1, -1 do
+		local rec = DB.log[i]
+		if t - rec.time > LOG_WINDOW then
+			break
+		end
+		if rec.zone == zone then
+			out[#out + 1] = rec
 		end
 	end
-	if rec.corpse or qualityOf(link) < 3 then
+	return out
+end
+
+local function miscRec(recs)
+	for _, rec in ipairs(recs) do
+		if isMisc(rec) then
+			return rec
+		end
+	end
+	return logKill(MISC, 0)
+end
+
+-- where a drop no record knows goes: the open boss kill (rare+ and its loot window not seen),
+-- else in an instance the zone's trash record
+local function targetRec(recs, link)
+	for _, rec in ipairs(recs) do
+		if not isMisc(rec) then
+			if not rec.corpse and qualityOf(link) >= 3 then
+				return rec
+			end
+			break
+		end
+	end
+	if inInstance() then
+		return miscRec(recs)
+	end
+	return nil
+end
+
+local function newEntry(recs, link, id)
+	local rec = targetRec(recs, link)
+	if not rec then
 		return nil
 	end
 	local e = { link = link, id = id }
@@ -399,40 +447,80 @@ local function chatEntry(rec, link)
 end
 
 -- a "Need Roll - 87 for [item] by X" / "X passed on: [item]" chat line
-local function chatRoll(rec, link, who, kind, roll)
-	local it = chatEntry(rec, link)
-	if it then
-		addRoll(it, who, kind, roll)
+local function chatRoll(recs, link, id, who, kind, roll)
+	local e
+	for pass = 1, 2 do
+		for _, rec in ipairs(recs) do
+			for _, x in ipairs(rec.items) do
+				if x.id == id and (pass == 1 and not x.winner or pass == 2 and (x.key or x.rolls)) then
+					e = x
+					break
+				end
+			end
+			if e then
+				break
+			end
+		end
+		if e then
+			break
+		end
+	end
+	e = e or newEntry(recs, link, id)
+	if e then
+		addRoll(e, who, kind, roll)
 	end
 end
 
--- a "won" / "receives loot" chat line; items not seen on the boss only when rare or better
-local function chatItem(rec, link, who, how)
-	local id = itemIdOf(link)
-	if not id then
+-- a "X won: [item]" or "X receives loot: [item]xN." line; each line counts once per drop
+local function chatItem(recs, link, id, who, how, n)
+	local whoKey = norm(who)
+	if not whoKey then
 		return
 	end
-	local whoKey = norm(who)
-	for _, e in ipairs(rec.items) do
-		if e.id == id and e.winner and sameName(norm(e.winner), whoKey) then
-			return -- known already (loot history or an earlier line)
+	local flag = how == "roll" and "wonSeen" or "lootSeen"
+	local e
+	-- the same player's drop this line confirms (roll history or the other line kind)
+	for _, rec in ipairs(recs) do
+		for _, x in ipairs(rec.items) do
+			if x.id == id and x.winner and not x[flag] and sameName(norm(x.winner), whoKey) then
+				e = x
+				break
+			end
+		end
+		if e then
+			break
 		end
 	end
-	for _, e in ipairs(rec.items) do
-		if e.id == id and not e.winner then
-			e.winner, e.how = who, e.how or how
-			for _, r in ipairs(e.rolls or {}) do
-				if sameName(norm(r.name), whoKey) then
-					e.roll = r.roll
+	-- a drop still without winner (seen in a loot window, or rolled)
+	if not e then
+		for _, rec in ipairs(recs) do
+			for _, x in ipairs(rec.items) do
+				if x.id == id and not x.winner then
+					e = x
+					break
 				end
 			end
-			return
+			if e then
+				break
+			end
 		end
 	end
-	if rec.corpse or qualityOf(link) < 3 then
-		return -- not on the boss: trash loot
+	e = e or newEntry(recs, link, id)
+	if not e then
+		return
 	end
-	rec.items[#rec.items + 1] = { link = link, id = id, winner = who, how = how }
+	if not e.winner then
+		e.winner, e.how = who, e.how or how
+		for _, r in ipairs(e.rolls or {}) do
+			if sameName(norm(r.name), whoKey) then
+				e.roll = r.roll
+			end
+		end
+	end
+	e[flag] = true
+	if n and n > 1 then
+		e.n = n
+	end
 end
 
 -- the client's own loot line formats (localized), turned into patterns with argument order
@@ -658,6 +746,31 @@ local function djBossNpc(encounterID, name)
 		end
 	end
 	return found
+end
+
+-- a creature listed as a boss in DungeonJournal
+local djBossSet
+local function djIsBoss(npc)
+	if not npc then
+		return false
+	end
+	if not djBossSet then
+		local ns = _G.ForeverDungeonJournal_NS
+		if type(ns) ~= "table" or type(ns.DB) ~= "table" then
+			return false
+		end
+		djBossSet = {}
+		for _, d in pairs(ns.DB) do
+			if type(d) == "table" and type(d.bosses) == "table" then
+				for _, b in ipairs(d.bosses) do
+					if type(b) == "table" and type(b.npcID) == "number" then
+						djBossSet[b.npcID] = true
+					end
+				end
+			end
+		end
+	end
+	return djBossSet[tonumber(npc)] == true
 end
 
 -- bosses that drop a Tarnished Undermine Real (once a day each): the Season of Discovery lists of 2024
@@ -988,7 +1101,8 @@ local function recordCorpse(c)
 		hideHint()
 	end
 	if first and c.npc and (next(c.items or {}) or hasCurrency) then
-		rememberCorpse(c, matching[1] and matching[1].rec)
+		local boss = hasCurrency or #matching > 0 or DB.links[c.npc] ~= nil or isBossCorpse(c.guid) or djIsBoss(c.npc)
+		rememberCorpse(c, matching[1] and matching[1].rec, boss)
 	end
 	if c.npc then
 		keys[#keys + 1] = "n" .. c.npc
@@ -1403,17 +1517,16 @@ local function onItemChat(text)
 	if type(text) ~= "string" or not text:find("item:", 1, true) then
 		return
 	end
-	local rec = openRec(nil)
-	if not rec then
+	local line = parseLootLine(text)
+	local id = line and line.item and line.who and itemIdOf(line.item)
+	if not id then
 		return
 	end
-	local line = parseLootLine(text)
-	if line and line.item and line.who then
-		if line.kind then
-			chatRoll(rec, line.item, line.who, line.kind, tonumber(line.roll))
-		else
-			chatItem(rec, line.item, line.who, line.how)
-		end
+	local recs = recentRecs()
+	if line.kind then
+		chatRoll(recs, line.item, id, line.who, line.kind, tonumber(line.roll))
+	else
+		chatItem(recs, line.item, id, line.who, line.how, tonumber(line.n))
 	end
 end
 
@@ -1695,7 +1808,7 @@ local function showLog(count, filter)
 				if it.winner then
 					who = it.winner .. (it.roll and (" (" .. it.roll .. ")") or "")
 				end
-				print("   " .. (it.link or ("item:" .. it.id)) .. " > " .. who)
+				print("   " .. (it.link or ("item:" .. it.id)) .. (it.n and (" x" .. it.n) or "") .. " > " .. who)
 				local rolls = rollsText(it.rolls)
 				if rolls then
 					print("      " .. rolls)
@@ -2266,13 +2379,14 @@ local function fillDetails()
 		styleRow(b, theme, "lootRow")
 		b.link, b.cid = it.link or ("item:" .. it.id), nil
 		b.icon:SetTexture(itemIcon(it.id))
-		b.name:SetText(it.link or ("item " .. it.id))
+		b.name:SetText((it.link or ("item " .. it.id)) .. (it.n and (" x" .. it.n) or ""))
 		b.name:SetTextColor(color(theme, "title"))
 		local who
 		if it.winner == "all passed" then
 			who = "All passed"
 		elseif it.winner then
-			who = "Won by " .. classColored(it.winner, it.winnerClass) .. (it.roll and ("  (" .. it.roll .. ")") or "")
+			local verb = (it.how == "loot" and not it.rolls) and "Looted by " or "Won by "
+			who = verb .. classColored(it.winner, it.winnerClass) .. (it.roll and ("  (" .. it.roll .. ")") or "")
 		else
 			who = "Winner not seen"
 		end
@@ -2386,7 +2500,7 @@ local function itemEntries(q)
 						winner = lower(it.winner),
 						roll = roll,
 					},
-					cells = { r.date or "", r.zone or "", r.boss or "", it.link or name, who, rollText },
+					cells = { r.date or "", r.zone or "", r.boss or "", (it.link or name) .. (it.n and (" x" .. it.n) or ""), who, rollText },
 					icon = itemIcon(it.id),
 					link = it.link or ("item:" .. it.id),
 					rec = r,
